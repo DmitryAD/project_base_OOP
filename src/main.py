@@ -26,7 +26,7 @@ class AbstractAccount(ABC):
 
     @staticmethod
     def _generate_id() -> str:
-        return str(uuid.uuid4())[:8].upper()
+        return str(uuid.uuid4().int)[:8]
 
     @abstractmethod
     def deposit(self, amount: float):
