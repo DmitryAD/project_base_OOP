@@ -341,11 +341,11 @@ def demo():
     acc1.withdraw(300)
     print(f"После снятия 300: {acc1}\n")
 
-    print("Попытка снять больше, чем есть на счёте:")
-    try:
-        acc1.withdraw(999999)
-    except InsufficientFundsError as e:
-        print(f"Ошибка: {e}")
+    # print("Попытка снять больше, чем есть на счёте:")
+    # try:
+    #     acc1.withdraw(999999)
+    # except InsufficientFundsError as e:
+    #     print(f"Ошибка: {e}")
 
     print("\n=== Демонстрация дочерних классов (День 2) ===\n")
 
