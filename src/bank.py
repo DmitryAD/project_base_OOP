@@ -71,12 +71,9 @@ class Bank:
     В отличие от _get_account (с подчёркиванием — внутренний метод
     самого Bank), этот метод предназначен для использования ДРУГИМИ
     классами, которые сотрудничают с Bank, но не являются его частью —
-    например, TransactionProcessor. Различие между "приватным" и
-    "публичным" интерфейсом класса — это явное обозначение того, что
-    можно вызывать извне, а что является внутренней реализацией,
-    которая может измениться без предупреждения.
+    например, TransactionProcessor.
     """
-    return self._get_account(account_id)
+        return self._get_account(account_id)
 
     def _check_night_restriction(self):
         current_time = self._time_provider().time()
