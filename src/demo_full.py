@@ -15,25 +15,6 @@ from bank import Bank
 from transaction import Transaction, TransactionType, TransactionQueue, TransactionProcessor
 
 
-class _TimeSwitch:
-    """
-    Вспомогательный класс-переключатель времени для демонстрации.
-
-    Обычная lambda всегда возвращает одно и то же значение, а в demo_day_5
-    нам нужно, чтобы ОДИН И ТОТ ЖЕ banks сначала "прожил" днём (чтобы
-    пополнение счёта прошло без ночной блокировки), а потом переключился
-    на ночь (чтобы проверить блокировку по риску). Поэтому вместо функции
-    используем объект с состоянием: метод __call__ делает экземпляр класса
-    вызываемым, как функцию (Bank ожидает именно вызываемый time_provider —
-    ему всё равно, function это, lambda или объект с __call__, лишь бы
-    можно было написать time_provider() и получить datetime).
-    """
-    def __init__(self, initial):
-        self.current = initial
-
-    def __call__(self):
-        return self.current
-
 
 def demo_day_1_2():
     """Дни 1-2: базовый счёт и три его подтипа с полиморфным поведением."""
@@ -158,30 +139,35 @@ def demo_day_5(bank: Bank, alice, alice_acc, processor):
     bank.withdraw_from_account(alice_acc.get_account_info()["account_id"], alice.client_id, 100)
     print("  прошло без блокировки")
 
-    print("\nИмитация высокорискованной операции (ночь + крупная сумма):")
+    print("\nИмитация высокорискованной операции (частые операции + крупная сумма):")
 
-    # сначала "день" — чтобы спокойно создать клиента и пополнить счёт,
-    # не упираясь в ночной хардблок Дня 3 (_check_night_restriction)
-    time_switch = _TimeSwitch(datetime(2026, 1, 1, 12, 0))
-    risky_bank = Bank(name="RiskBank", time_provider=time_switch)
+    # фиксированное дневное время — чтобы демо не зависело от того,
+    # в какой момент реально запущен скрипт (иначе, если контейнер
+    # окажется в поясе, где сейчас ночь по UTC, ночной хардблок Дня 3
+    # сработает и здесь, испортив демонстрацию)
+    risky_bank = Bank(name="RiskBank", time_provider=lambda: datetime(2026, 1, 1, 12, 0))
     risky_client = risky_bank.add_client(Client(full_name="Рискованный Клиент", birth_date=date(1990, 1, 1)))
 
     # max_transaction_limit=2_000_000 — иначе сработает лимит на ОДНУ
     # операцию (День 1-2, по умолчанию 100_000 для обычного BankAccount)
-    # раньше, чем мы дойдём до риск-анализа Дня 5, который и хотим показать
     risky_acc = risky_bank.open_account(
         risky_client.client_id, account_type="bank", max_transaction_limit=2_000_000.0,
     )
-    risky_bank.deposit_to_account(risky_acc.get_account_info()["account_id"], 1_000_000)
+    account_id = risky_acc.get_account_info()["account_id"]
+    risky_bank.deposit_to_account(account_id, 1_000_000)
 
-    # теперь переключаем "часы" банка на 2 часа ночи — и только СЕЙЧАС
-    # пытаемся снять деньги, чтобы поймать именно риск-блокировку Дня 5
-    # (SuspiciousOperationBlockedError), а не ночной хардблок Дня 3
-    time_switch.current = datetime(2026, 1, 1, 2, 0)
+    # "разгоняем" признак "частые операции": 5 небольших снятий подряд.
+    # Каждое из них само по себе низкорискованное (0 признаков — LOW),
+    # но RiskAnalyzer считает их ВМЕСТЕ по истории клиента — и уже
+    # 6-я операция увидит "позади" 5 операций за последние 10 минут.
+    for _ in range(5):
+        risky_bank.withdraw_from_account(account_id, risky_client.client_id, 100)
+
+    # 6-я операция: срабатывают сразу ДВА признака одновременно —
+    # "частые операции" (только что было 5 подряд) И "крупная сумма"
+    # (> 500_000) => 2 признака => HIGH => блокировка
     try:
-        risky_bank.withdraw_from_account(
-            risky_acc.get_account_info()["account_id"], risky_client.client_id, 600000,
-        )
+        risky_bank.withdraw_from_account(account_id, risky_client.client_id, 600000)
     except SuspiciousOperationBlockedError as e:
         print(f"  Заблокировано: {e}")
 
