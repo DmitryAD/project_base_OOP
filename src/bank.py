@@ -65,14 +65,14 @@ class Bank:
         return account
 
     def get_account(self, account_id: str):
-    """
-    Публичный доступ к счёту по ID.
-
-    В отличие от _get_account (с подчёркиванием — внутренний метод
-    самого Bank), этот метод предназначен для использования ДРУГИМИ
-    классами, которые сотрудничают с Bank, но не являются его частью —
-    например, TransactionProcessor.
-    """
+        """
+        Публичный доступ к счёту по ID.
+    
+        В отличие от _get_account (с подчёркиванием — внутренний метод
+        самого Bank), этот метод предназначен для использования ДРУГИМИ
+        классами, которые сотрудничают с Bank, но не являются его частью —
+        например, TransactionProcessor.
+        """
         return self._get_account(account_id)
 
     def _check_night_restriction(self):
