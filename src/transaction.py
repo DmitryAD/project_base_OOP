@@ -11,6 +11,7 @@ from exceptions import (
     InvalidOperationError,
     CurrencyConversionError,
     TransactionNotFoundError,
+    SuspiciousOperationBlockedError,
 )
 
 
@@ -245,6 +246,7 @@ class TransactionProcessor:
         self.error_log.append({
             "transaction_id": transaction.transaction_id,
             "error": str(error),
+            "error_type": type(error).__name__,
             "attempt": attempt,
             "timestamp": datetime.now(),
         })
@@ -279,6 +281,21 @@ class TransactionProcessor:
 
         transaction.mark_processing()
         transaction.fee = self._calculate_fee(transaction)
+
+                # === НОВОЕ (День 5) ===
+        if transaction.transaction_type != TransactionType.DEPOSIT:
+            client_id = self.bank.get_client_id_for_account(transaction.sender_account_id)
+            try:
+                self.bank.check_operation_risk(
+                    client_id=client_id,
+                    amount=transaction.amount,
+                    receiver_account_id=transaction.receiver_account_id,
+                )
+            except SuspiciousOperationBlockedError as e:
+                self._log_error(transaction, e, attempt=0)
+                transaction.mark_failed(str(e))
+                return False
+        # === КОНЕЦ НОВОГО ===
 
         attempt = 0
         while attempt < self.max_retries:
