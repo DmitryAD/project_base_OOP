@@ -64,6 +64,20 @@ class Bank:
             raise AccountNotFoundError(f"Счёт с ID {account_id} не найден.")
         return account
 
+    def get_account(self, account_id: str):
+    """
+    Публичный доступ к счёту по ID.
+
+    В отличие от _get_account (с подчёркиванием — внутренний метод
+    самого Bank), этот метод предназначен для использования ДРУГИМИ
+    классами, которые сотрудничают с Bank, но не являются его частью —
+    например, TransactionProcessor. Различие между "приватным" и
+    "публичным" интерфейсом класса — это явное обозначение того, что
+    можно вызывать извне, а что является внутренней реализацией,
+    которая может измениться без предупреждения.
+    """
+    return self._get_account(account_id)
+
     def _check_night_restriction(self):
         current_time = self._time_provider().time()
         if NIGHT_START <= current_time < NIGHT_END:
