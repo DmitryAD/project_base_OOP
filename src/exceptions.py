@@ -18,7 +18,6 @@ class InsufficientFundsError(Exception):
     pass
 
 
-# === НОВОЕ (День 3) ===
 class UnderageClientError(Exception):
     """Клиенту меньше минимально разрешённого возраста."""
     pass
@@ -47,4 +46,13 @@ class ClientBlockedError(Exception):
 class NightOperationRestrictedError(Exception):
     """Операции запрещены в период с 00:00 до 05:00."""
     pass
-# === КОНЕЦ НОВОГО ===
+
+
+class CurrencyConversionError(Exception):
+    """Не удалось получить курс конвертации между валютами."""
+    pass
+
+
+class TransactionNotFoundError(Exception):
+    """Транзакция с таким ID не найдена в очереди."""
+    pass
