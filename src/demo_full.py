@@ -165,7 +165,13 @@ def demo_day_5(bank: Bank, alice, alice_acc, processor):
     time_switch = _TimeSwitch(datetime(2026, 1, 1, 12, 0))
     risky_bank = Bank(name="RiskBank", time_provider=time_switch)
     risky_client = risky_bank.add_client(Client(full_name="Рискованный Клиент", birth_date=date(1990, 1, 1)))
-    risky_acc = risky_bank.open_account(risky_client.client_id, account_type="bank")
+
+    # max_transaction_limit=2_000_000 — иначе сработает лимит на ОДНУ
+    # операцию (День 1-2, по умолчанию 100_000 для обычного BankAccount)
+    # раньше, чем мы дойдём до риск-анализа Дня 5, который и хотим показать
+    risky_acc = risky_bank.open_account(
+        risky_client.client_id, account_type="bank", max_transaction_limit=2_000_000.0,
+    )
     risky_bank.deposit_to_account(risky_acc.get_account_info()["account_id"], 1_000_000)
 
     # теперь переключаем "часы" банка на 2 часа ночи — и только СЕЙЧАС
@@ -182,7 +188,6 @@ def demo_day_5(bank: Bank, alice, alice_acc, processor):
     print(f"\nОтчёт по подозрительным операциям: {len(risky_bank.get_suspicious_operations_report())} событий")
     print(f"Риск-профиль рискованного клиента: {risky_bank.get_client_risk_profile(risky_client.client_id)}")
     print(f"Статистика ошибок обработки транзакций (данные Дня 4): {bank.get_error_statistics(processor.error_log)}")
-
 
 def run_full_demo():
     print("ПОЛНАЯ ДЕМОНСТРАЦИЯ ПРОЕКТА (Дни 1-5)")
