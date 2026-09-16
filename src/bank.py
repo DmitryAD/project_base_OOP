@@ -148,7 +148,7 @@ class Bank:
         if client.status == ClientStatus.BLOCKED:
             raise ClientBlockedError(f"Клиент {client_id} заблокирован.")
 
-        if client.password != password:
+        if not client.verify_password(password):
             attempts = self._login_attempts.get(client_id, 0) + 1
             self._login_attempts[client_id] = attempts
 
