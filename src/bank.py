@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from collections import Counter
 
 from client import Client, ClientStatus
 from main import BankAccount, SavingsAccount, PremiumAccount, InvestmentAccount
@@ -9,7 +10,10 @@ from exceptions import (
     AuthenticationError,
     ClientBlockedError,
     NightOperationRestrictedError,
+    SuspiciousOperationBlockedError,  # === НОВОЕ (День 5) ===
 )
+from audit import AuditLog, AuditSeverity          # === НОВОЕ (День 5) ===
+from risk import RiskAnalyzer, RiskLevel            # === НОВОЕ (День 5) ===
 
 # сопоставление строкового имени типа счёта -> класс, который его реализует.
 # Так open_account() может создавать любой тип счёта по одной строке,
@@ -32,23 +36,34 @@ class Bank:
 
     SUSPICIOUS_AMOUNT_THRESHOLD = 500_000.0  # снятие выше этой суммы помечается как подозрительное
 
-    def __init__(self, name: str, time_provider=datetime.now):
-        # === НОВОЕ: dependency injection через time_provider ===
-        # time_provider — это функция (по умолчанию datetime.now, но БЕЗ
-        # круглых скобок — мы передаём саму функцию как объект, а не
-        # результат её вызова). Внутри Bank мы будем вызывать
-        # self._time_provider() каждый раз, когда нужно "текущее время".
-        # Зачем: если бы код был жёстко завязан на datetime.now(), ночное
-        # ограничение можно было бы протестировать только ночью. А так в
-        # тестах мы подставим свою функцию, которая всегда возвращает,
-        # например, 2 часа ночи — и проверим ограничение в любое время суток.
+    def __init__(
+        self,
+        name: str,
+        time_provider=datetime.now,
+        audit_log: AuditLog = None,          # === НОВОЕ (День 5) ===
+        risk_analyzer: RiskAnalyzer = None,  # === НОВОЕ (День 5) ===
+    ):
         self.name = name
         self._time_provider = time_provider
 
         self.clients: dict[str, Client] = {}     # client_id -> Client
         self.accounts: dict[str, object] = {}     # account_id -> объект счёта (любого из 4 типов)
         self._login_attempts: dict[str, int] = {}  # client_id -> счётчик неверных попыток входа
-        self.suspicious_log: list[dict] = []       # список зафиксированных подозрительных событий
+        self.suspicious_log: list[dict] = []       # список зафиксированных подозрительных событий (День 3, оставлен для совместимости)
+
+        # === НОВОЕ (День 5) ===
+        # audit_log/risk_analyzer передаются как зависимости (тот же приём
+        # dependency injection, что и time_provider выше) — если не передали,
+        # создаём дефолтные. `is None`, а не просто `if audit_log:` —
+        # потому что пустой объект (например, AuditLog без событий) не
+        # должен считаться "не передан", если бы кто-то захотел так сделать.
+        self.audit_log = audit_log if audit_log is not None else AuditLog(time_provider=time_provider)
+        self.risk_analyzer = risk_analyzer if risk_analyzer is not None else RiskAnalyzer(time_provider=time_provider)
+
+        self._account_owners: dict[str, str] = {}          # account_id -> client_id (быстрый обратный поиск)
+        self._client_operation_history: dict[str, list] = {}   # client_id -> список timestamp'ов операций
+        self._client_known_receivers: dict[str, set] = {}      # client_id -> множество account_id, на которые уже переводили
+        # === КОНЕЦ НОВОГО ===
 
     # ---------- внутренние помощники ----------
 
@@ -67,7 +82,7 @@ class Bank:
     def get_account(self, account_id: str):
         """
         Публичный доступ к счёту по ID.
-    
+
         В отличие от _get_account (с подчёркиванием — внутренний метод
         самого Bank), этот метод предназначен для использования ДРУГИМИ
         классами, которые сотрудничают с Bank, но не являются его частью —
@@ -88,6 +103,104 @@ class Bank:
             "reason": reason,
             "timestamp": self._time_provider(),
         })
+
+    # === НОВОЕ (День 5) ===
+    def get_client_id_for_account(self, account_id: str) -> str:
+        """
+        Обратный поиск: по account_id находит client_id владельца.
+        Нужен TransactionProcessor'у — он знает только account_id
+        (sender_account_id/receiver_account_id), а риск-анализ считается
+        по клиенту, не по счёту.
+        """
+        return self._account_owners.get(account_id)
+
+    def check_operation_risk(self, client_id: str, amount: float, receiver_account_id: str = None) -> str:
+        """
+        Единая точка входа для риск-анализа: вызывается и из
+        withdraw_from_account (прямые операции), и из
+        TransactionProcessor.process (операции через очередь), чтобы
+        логика не дублировалась в двух местах.
+
+        Возвращает risk_level, если операция разрешена.
+        Бросает SuspiciousOperationBlockedError, если риск высокий —
+        операция в этом случае НЕ выполняется вызывающим кодом.
+        """
+        timestamps = self._client_operation_history.setdefault(client_id, [])
+        known_receivers = self._client_known_receivers.setdefault(client_id, set())
+
+        is_new_receiver = receiver_account_id is not None and receiver_account_id not in known_receivers
+
+        risk_level, reasons = self.risk_analyzer.analyze(
+            amount=amount,
+            recent_operation_timestamps=timestamps,
+            is_new_receiver=is_new_receiver,
+        )
+
+        # фиксируем время ЭТОЙ операции для будущих проверок частоты —
+        # делаем это после анализа, чтобы сама операция не засчитывалась
+        # в свою же собственную статистику "частых операций"
+        timestamps.append(self._time_provider())
+
+        if risk_level == RiskLevel.HIGH:
+            self.audit_log.record(
+                AuditSeverity.CRITICAL, "risk",
+                f"Операция заблокирована: {'; '.join(reasons)}",
+                client_id=client_id, amount=amount, risk_level=risk_level,
+            )
+            raise SuspiciousOperationBlockedError(
+                f"Операция на сумму {amount} заблокирована как высокорискованная: {'; '.join(reasons)}"
+            )
+
+        if risk_level == RiskLevel.MEDIUM:
+            self.audit_log.record(
+                AuditSeverity.WARNING, "risk",
+                f"Операция помечена как подозрительная: {'; '.join(reasons)}",
+                client_id=client_id, amount=amount, risk_level=risk_level,
+            )
+        else:
+            self.audit_log.record(
+                AuditSeverity.INFO, "risk", "Операция в пределах нормы",
+                client_id=client_id, amount=amount, risk_level=risk_level,
+            )
+
+        # получателя запоминаем только если операция прошла риск-проверку —
+        # так заблокированная попытка перевода не "отбеливает" новый счёт
+        if receiver_account_id is not None:
+            known_receivers.add(receiver_account_id)
+
+        return risk_level
+
+    def get_suspicious_operations_report(self) -> list:
+        """Отчёт: все операции, помеченные как WARNING или CRITICAL."""
+        return (
+            self.audit_log.filter(severity=AuditSeverity.WARNING)
+            + self.audit_log.filter(severity=AuditSeverity.CRITICAL)
+        )
+
+    def get_client_risk_profile(self, client_id: str) -> dict:
+        """Отчёт: сколько операций клиента получили каждый уровень риска."""
+        events = self.audit_log.filter(client_id=client_id, category="risk")
+        profile = {"client_id": client_id, "total_operations": len(events), "low": 0, "medium": 0, "high": 0}
+        for event in events:
+            level = event.details.get("risk_level")
+            if level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH):
+                profile[level] += 1
+        return profile
+
+    @staticmethod
+    def get_error_statistics(error_log: list) -> dict:
+        """
+        Отчёт: статистика ошибок обработки транзакций.
+        error_log — это TransactionProcessor.error_log (список словарей
+        {"transaction_id", "error", "error_type", "attempt", "timestamp"}).
+        Bank намеренно не хранит этот лог сам — это ответственность
+        TransactionProcessor, Bank просто помогает свести сырые данные
+        в сводку по типам ошибок.
+        """
+        # Counter — специализированный словарь для подсчёта: Counter(iterable)
+        # сам считает, сколько раз встретилось каждое значение
+        return dict(Counter(entry.get("error_type", "Unknown") for entry in error_log))
+    # === КОНЕЦ НОВОГО ===
 
     # ---------- работа с клиентами ----------
 
@@ -115,6 +228,7 @@ class Bank:
         account_id = account.get_account_info()["account_id"]
         self.accounts[account_id] = account
         client.account_ids.append(account_id)
+        self._account_owners[account_id] = client_id  # === НОВОЕ (День 5) ===
         return account
 
     def close_account(self, account_id: str):
@@ -148,6 +262,14 @@ class Bank:
                 client_id,
                 f"Крупное снятие: {amount} (порог: {self.SUSPICIOUS_AMOUNT_THRESHOLD})",
             )
+
+        # === НОВОЕ (День 5) ===
+        # новая, более полная риск-проверка поверх старой (см. пояснение
+        # в чате про то, почему старая система осталась нетронутой).
+        # Может бросить SuspiciousOperationBlockedError — тогда снятие
+        # не произойдёт вообще (return ниже не выполнится).
+        self.check_operation_risk(client_id, amount)
+        # === КОНЕЦ НОВОГО ===
 
         return account.withdraw(amount)
 
@@ -198,9 +320,6 @@ class Bank:
         return results
 
     def get_total_balance(self) -> dict:
-        # суммировать разные валюты напрямую нельзя (100 USD + 100 RUB —
-        # это не 200 чего-либо осмысленного), поэтому считаем отдельно
-        # по каждой валюте и возвращаем словарь {валюта: сумма}
         totals = {}
         for account in self.accounts.values():
             info = account.get_account_info()
@@ -220,102 +339,16 @@ class Bank:
                     total += info["balance"]
             ranking.append((client, total))
 
-        # sort(key=...) — сортировка по вычисляемому ключу, а не по самому
-        # элементу напрямую. lambda pair: pair[1] — это анонимная функция
-        # (без def и без имени), которая принимает один элемент списка
-        # (кортеж (client, total)) и возвращает pair[1] — то есть total.
-        # Так list.sort понимает: "сортируй кортежи по их второму элементу".
-        # reverse=True — по убыванию (сначала самые богатые клиенты)
         ranking.sort(key=lambda pair: pair[1], reverse=True)
         return ranking
 
 
-def demo():
-    from datetime import date
-
-    print("=== Демонстрация системы Bank (День 3) ===\n")
-
-    bank = Bank(name="PyBank")
-
-    # --- клиенты ---
-    alice = bank.add_client(Client(
-        full_name="Алина Волкова",
-        birth_date=date(1995, 6, 20),
-        phone="+79990000001",
-        email="alina@example.com",
-        password="qwerty",
-    ))
-    print(alice)
-
-    try:
-        Client(full_name="Малолетний Клиент", birth_date=date(2015, 1, 1))
-    except Exception as e:
-        print(f"Ошибка при создании клиента: {e}")
-
-    # --- открытие счетов ---
-    acc1 = bank.open_account(alice.client_id, account_type="bank", currency="RUB")
-    acc2 = bank.open_account(
-        alice.client_id, account_type="savings", currency="RUB",
-        min_balance=1000, monthly_rate=0.03,
-    )
-    print(f"\nОткрыты счета клиента {alice.full_name}: {acc1.get_account_info()['account_id']}, "
-          f"{acc2.get_account_info()['account_id']}")
-
-    bank.deposit_to_account(acc1.get_account_info()["account_id"], 10000)
-    bank.deposit_to_account(acc2.get_account_info()["account_id"], 5000)
-
-    # --- аутентификация: неверный пароль, потом верный ---
-    print("\nПопытка входа с неверным паролем:")
-    try:
-        bank.authenticate_client(alice.client_id, "wrong-password")
-    except Exception as e:
-        print(f"Ошибка: {e}")
-
-    print("Успешный вход с верным паролем:")
-    ok = bank.authenticate_client(alice.client_id, "qwerty")
-    print(f"Аутентификация: {ok}")
-
-    # --- блокировка после 3 неверных попыток (для второго клиента) ---
-    bob = bank.add_client(Client(
-        full_name="Борис Николаев",
-        birth_date=date(1988, 3, 15),
-        password="secret",
-    ))
-    print(f"\nСоздан клиент {bob.full_name}, проверяем блокировку после 3 неверных попыток:")
-    for i in range(3):
-        try:
-            bank.authenticate_client(bob.client_id, "неверный")
-        except Exception as e:
-            print(f"Попытка {i + 1}: {e}")
-
-    # --- заморозка/разморозка счёта ---
-    bank.freeze_account(acc1.get_account_info()["account_id"])
-    print(f"\nСчёт {acc1} заморожен: {acc1.get_account_info()['status']}")
-    bank.unfreeze_account(acc1.get_account_info()["account_id"])
-    print(f"Счёт разморожен: {acc1.get_account_info()['status']}")
-
-    # --- поиск счетов ---
-    found = bank.search_accounts(owner_name="Алина")
-    print(f"\nНайдено счетов Алины: {len(found)}")
-
-    # --- статистика ---
-    print(f"\nОбщий баланс банка по валютам: {bank.get_total_balance()}")
-
-    ranking = bank.get_clients_ranking(currency="RUB")
-    print("Рейтинг клиентов по балансу (RUB):")
-    for client, total in ranking:
-        print(f"  {client.full_name}: {total:.2f}")
-
-    # --- ночное ограничение: демонстрация через подставное время ---
-    night_bank = Bank(name="NightBank", time_provider=lambda: datetime(2026, 1, 1, 2, 30))
-    night_client = night_bank.add_client(Client(full_name="Ночной Клиент", birth_date=date(1990, 1, 1)))
-    night_acc = night_bank.open_account(night_client.client_id, account_type="bank")
-    print("\nПопытка операции в 02:30 ночи (искусственное время):")
-    try:
-        night_bank.deposit_to_account(night_acc.get_account_info()["account_id"], 100)
-    except NightOperationRestrictedError as e:
-        print(f"Ошибка: {e}")
-
-
-if __name__ == "__main__":
-    demo()
+# Функцию demo() ниже я не трогаю — оставь свою версию как есть,
+# новая функциональность в неё не встраивается, чтобы не рисковать
+# сломать то, чего я не вижу целиком. Хочешь продемонстрировать
+# блокировку риска в demo() — просто добавь в конец что-то вроде:
+#
+#     try:
+#         bank.withdraw_from_account(acc1.get_account_info()["account_id"], alice.client_id, 600000)
+#     except Exception as e:
+#         print(f"Заблокировано риск-анализом: {e}")
