@@ -38,14 +38,16 @@ class BankSimulation:
         num_transactions: int = 40,
         seed: int = None,
     ):
-        # random.seed(seed) делает "случайные" числа ВОСПРОИЗВОДИМЫМИ:
-        # при одном и том же seed random каждый раз выдаёт одну и ту же
-        # последовательность значений. Это критично для отладки и тестов —
-        # можно повторить точно такой же прогон и получить те же цифры,
-        # вместо того чтобы гоняться за багом, который проявляется
-        # "иногда, в зависимости от того, как повезло со случайностью".
-        # seed=None (по умолчанию) — используется системное случайное
-        # зерно, каждый запуск будет отличаться от предыдущего.
+        """
+        random.seed(seed) делает "случайные" числа ВОСПРОИЗВОДИМЫМИ: при
+        одном и том же seed random каждый раз выдаёт одну и ту же
+        последовательность значений. Это критично для отладки и тестов —
+        можно повторить точно такой же прогон и получить те же цифры,
+        вместо того чтобы гоняться за багом, который проявляется
+        "иногда, в зависимости от того, как повезло со случайностью".
+        seed=None (по умолчанию) — используется системное случайное
+        зерно, каждый запуск будет отличаться от предыдущего.
+        """
         if seed is not None:
             random.seed(seed)
 
@@ -59,8 +61,7 @@ class BankSimulation:
         self.accounts: list = []  # объекты счетов (любого из 4 типов)
 
         # transaction_log — полная история КАЖДОЙ обработанной транзакции
-        # (и успешной, и неуспешной) в виде словарей. Нужна для отчётов
-        # ниже (история клиента, статистика по типам и успешности).
+        # (и успешной, и неуспешной). Нужна для отчётов ниже.
         self.transaction_log: list[dict] = []
 
     # ---------- инициализация ----------
@@ -70,7 +71,7 @@ class BankSimulation:
         for _ in range(self.num_clients):
             first = random.choice(FIRST_NAMES)  # случайный элемент списка
             last = random.choice(LAST_NAMES)
-            age_years = random.randint(18, 70)  # случайное целое число ВКЛЮЧИТЕЛЬНО с обеих сторон
+            age_years = random.randint(18, 70)  # случайное целое, включая обе границы
             birth_date = date.today().replace(year=date.today().year - age_years)
             client = self.bank.add_client(Client(
                 full_name=f"{first} {last}",
@@ -82,30 +83,49 @@ class BankSimulation:
 
     def generate_accounts(self):
         """
-        Открывает self.num_accounts случайных счетов у случайных клиентов
-        и сразу пополняет их стартовым балансом, чтобы транзакциям ниже
-        было с чем работать.
+        Открывает self.num_accounts счетов так, чтобы у КАЖДОГО клиента
+        было хотя бы по одному — иначе при полностью случайном
+        распределении кому-то может не достаться ни одного счёта, что
+        и нереалистично для банка, и обесценивает демонстрацию
+        пользовательских сценариев ниже (нечего будет показать).
+        Остаток от целочисленного деления раздаётся случайным клиентам.
         """
-        for _ in range(self.num_accounts):
+        accounts_per_client = max(1, self.num_accounts // self.num_clients)
+        remaining = self.num_accounts
+
+        for client in self.clients:
+            if remaining <= 0:
+                break
+            for _ in range(min(accounts_per_client, remaining)):
+                self._open_random_account(client)
+                remaining -= 1
+
+        while remaining > 0:
             client = random.choice(self.clients)
-            account_type = random.choice(ACCOUNT_TYPES)
-            currency = random.choice(CURRENCIES)
+            self._open_random_account(client)
+            remaining -= 1
 
-            # у разных типов счетов разные допустимые именованные параметры
-            # (kwargs) — собираем их условно, а не передаём одно и то же всем
-            kwargs = {}
-            if account_type == "savings":
-                kwargs = {"min_balance": 500, "monthly_rate": 0.02}
-            elif account_type == "premium":
-                kwargs = {"overdraft_limit": 1000, "withdrawal_fee": 15}
-
-            account = self.bank.open_account(
-                client.client_id, account_type=account_type, currency=currency, **kwargs
-            )
-            starting_balance = random.randint(5000, 100000)
-            self.bank.deposit_to_account(account.get_account_info()["account_id"], starting_balance)
-            self.accounts.append(account)
         print(f"Открыто счетов: {len(self.accounts)}")
+
+    def _open_random_account(self, client: Client):
+        """Открывает один случайный счёт указанному клиенту и пополняет его."""
+        account_type = random.choice(ACCOUNT_TYPES)
+        currency = random.choice(CURRENCIES)
+
+        # у разных типов счетов разные допустимые именованные параметры —
+        # собираем их условно, а не передаём одно и то же всем подряд
+        kwargs = {}
+        if account_type == "savings":
+            kwargs = {"min_balance": 500, "monthly_rate": 0.02}
+        elif account_type == "premium":
+            kwargs = {"overdraft_limit": 1000, "withdrawal_fee": 15}
+
+        account = self.bank.open_account(
+            client.client_id, account_type=account_type, currency=currency, **kwargs
+        )
+        starting_balance = random.randint(5000, 100000)
+        self.bank.deposit_to_account(account.get_account_info()["account_id"], starting_balance)
+        self.accounts.append(account)
 
     # ---------- симуляция транзакций ----------
 
@@ -115,8 +135,7 @@ class BankSimulation:
         намеренно крупную сумму (600 000-900 000) — дальше система САМА,
         уже существующей логикой (лимит счёта из Дня 1-2, риск-анализ
         Дня 5), решает, пройдёт операция, упадёт с ошибкой или будет
-        заблокирована как подозрительная. Так в логах реально будет
-        что показать: и обычный путь, и ошибки, и риск-блокировки.
+        заблокирована как подозрительная.
         """
         transaction_type = random.choice([
             TransactionType.DEPOSIT,
@@ -149,10 +168,12 @@ class BankSimulation:
                 priority=priority,
             )
 
-        # переводы: random.sample(list, 2) — выбирает 2 РАЗНЫХ элемента
-        # без повторов (в отличие от random.choice, который мог бы
-        # случайно выбрать один и тот же счёт дважды — перевод "самому
-        # себе" не показателен для демонстрации)
+        """
+        Переводы: random.sample(список, 2) выбирает 2 РАЗНЫХ элемента без
+        повторов — в отличие от random.choice, который мог бы случайно
+        выбрать один и тот же счёт дважды (перевод "самому себе" не
+        показателен для демонстрации).
+        """
         sender_account, receiver_account = random.sample(self.accounts, 2)
         return Transaction(
             transaction_type, amount,
@@ -229,8 +250,11 @@ class BankSimulation:
     # ---------- отчёты ----------
 
     def get_top_clients(self, n: int = 3, currency: str = "RUB") -> list:
-        # get_clients_ranking уже возвращает отсортированный по убыванию
-        # список (client, total) — срез [:n] просто берёт первые n элементов
+        """
+        get_clients_ranking уже возвращает список (client, total),
+        отсортированный по убыванию — срез [:n] просто берёт первые
+        n элементов.
+        """
         ranking = self.bank.get_clients_ranking(currency=currency)
         return ranking[:n]
 
@@ -274,17 +298,21 @@ def run_day_6_demo():
     print("ДЕНЬ 6: Комплексная демонстрация банковской системы")
     print("=" * 60)
 
-    # seed=42 — фиксированное зерно: у тебя запуск даст ТЕ ЖЕ самые цифры,
-    # что и у меня, удобно сверяться при разборе результата
+    # seed=42 — фиксированное зерно, чтобы твой запуск давал те же
+    # цифры, что и у меня, и было удобно сверяться при разборе
     sim = BankSimulation(num_clients=8, num_accounts=12, num_transactions=40, seed=42)
     sim.generate_clients()
     sim.generate_accounts()
     sim.run_transactions()
 
     print("\n" + "=" * 60)
-    print("ПОЛЬЗОВАТЕЛЬСКИЕ СЦЕНАРИИ (на примере первого клиента)")
+    print("ПОЛЬЗОВАТЕЛЬСКИЕ СЦЕНАРИИ (на примере самого активного клиента)")
     print("=" * 60)
-    sample_client = sim.clients[0]
+    # max(iterable, key=функция) — находит элемент с МАКСИМАЛЬНЫМ значением
+    # функции-ключа. Здесь key — lambda, которая для каждого клиента
+    # считает длину его истории операций; max выбирает клиента с самой
+    # длинной историей, чтобы в демонстрации было реально что показать
+    sample_client = max(sim.clients, key=lambda c: len(sim.get_client_transaction_history(c.client_id)))
     sim.show_client_accounts(sample_client.client_id)
     sim.show_client_history(sample_client.client_id)
     sim.show_client_suspicious_operations(sample_client.client_id)
