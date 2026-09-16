@@ -56,3 +56,15 @@ class CurrencyConversionError(Exception):
 class TransactionNotFoundError(Exception):
     """Транзакция с таким ID не найдена в очереди."""
     pass
+
+class SuspiciousOperationBlockedError(Exception):
+    """
+    Операция заблокирована банком как высокорискованная.
+
+    Отличие от остальных "постоянных" ошибок (AccountFrozenError и т.д.)
+    в том, что технически со счётом всё в порядке — деньги есть, счёт
+    активен. Блокировка происходит не из-за состояния счёта, а из-за
+    решения RiskAnalyzer (День 5): слишком много признаков подозрительности
+    сработало одновременно.
+    """
+    pass
