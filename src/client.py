@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import secrets
 import uuid
 from datetime import date
 
@@ -12,7 +15,7 @@ class ClientStatus:
 class Client:
     """Клиент банка: ФИО, дата рождения, контакты, список ID своих счетов, статус."""
 
-    MIN_AGE = 18  # атрибут класса — единая точка правды про минимальный возраст
+    MIN_AGE = 18
 
     def __init__(
         self,
@@ -31,13 +34,19 @@ class Client:
         self.birth_date = birth_date
         self.phone = phone
         self.email = email
-        self.password = password  # упрощённо: в реальном проекте пароль всегда хранят хешем, не открытым текстом
         self.status = ClientStatus.ACTIVE
-        self.account_ids = []  # список ID счетов клиента (не сами объекты счетов — только ссылки на них)
+        self.account_ids = []
 
-        # проверка возраста делается в самом конце __init__, когда все
-        # остальные поля уже выставлены — self.age (см. ниже) их не использует,
-        # но такой порядок логичнее: сначала собрать объект, потом провалидировать целиком
+        """
+        НОВОЕ: пароль больше не хранится напрямую. Вместо self.password
+        вызываем set_password(password), который сам создаёт соль и хеш
+        и сохраняет их в self._salt и self._password_hash. Само значение
+        password нигде не остаётся в объекте после этой строки.
+        """
+        self._salt = None
+        self._password_hash = None
+        self.set_password(password)
+
         if self.age < self.MIN_AGE:
             raise UnderageClientError(
                 f"Клиент должен быть не младше {self.MIN_AGE} лет (сейчас: {self.age})."
@@ -47,20 +56,50 @@ class Client:
     def _generate_client_id() -> str:
         return str(uuid.uuid4().int)[:8]
 
+    def set_password(self, password: str):
+        """
+        Задать (или сменить) пароль клиента.
+
+        secrets.token_hex(16) — генерирует криптографически надёжную
+        случайную строку из 16 байт, представленную как 32 hex-символа.
+        Модуль secrets (в отличие от random) предназначен именно для
+        значений, связанных с безопасностью — паролей, токенов, ключей —
+        потому что его генератор случайности криптографически стойкий,
+        а обычный random таким не является и предсказуем при определённых
+        условиях.
+
+        hashlib.sha256(...).hexdigest() — считает хеш SHA-256 от байтовой
+        строки и возвращает его как обычную читаемую hex-строку.
+        Перед хешированием склеиваем соль и пароль (salt + password) —
+        это и есть "подмешивание" соли.
+        """
+        self._salt = secrets.token_hex(16)
+        self._password_hash = self._hash_password(password, self._salt)
+
+    @staticmethod
+    def _hash_password(password: str, salt: str) -> str:
+        raw = (salt + password).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def verify_password(self, password: str) -> bool:
+        """
+        Проверить, совпадает ли введённый пароль с сохранённым хешем.
+
+        Считаем хеш от (сохранённая соль + введённый пароль) и сравниваем
+        с self._password_hash. Используем hmac.compare_digest вместо
+        обычного == — это сравнение, устойчивое к timing-атакам: обычное
+        == останавливается на первом несовпадающем символе, и по времени
+        выполнения теоретически можно угадывать пароль посимвольно.
+        compare_digest всегда сравнивает за одинаковое время, независимо
+        от того, где нашлось несовпадение.
+        """
+        candidate_hash = self._hash_password(password, self._salt)
+        return hmac.compare_digest(candidate_hash, self._password_hash)
+
     @property
     def age(self) -> int:
-        # === НОВОЕ: @property ===
-        # @property превращает метод в "вычисляемый атрибут": снаружи его
-        # читают БЕЗ круглых скобок — client.age, а не client.age().
-        # Смысл: возраст не хранится как отдельное поле (self._age = ...),
-        # потому что он бы устаревал каждый день рождения. Вместо этого он
-        # каждый раз СЧИТАЕТСЯ заново из birth_date — это гарантирует, что
-        # client.age всегда актуален на момент обращения.
         today = date.today()
         years = today.year - self.birth_date.year
-        # если день рождения в этом году ещё не наступил (сравниваем
-        # кортежи (месяц, день) — Python сравнивает их поэлементно,
-        # как строки) — вычитаем один год, чтобы не засчитать "будущий" ДР
         had_birthday_this_year = (today.month, today.day) >= (
             self.birth_date.month,
             self.birth_date.day,
