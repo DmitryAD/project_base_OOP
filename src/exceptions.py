@@ -1,70 +1,61 @@
-class AccountFrozenError(Exception):
+"""Исключения банковской системы."""
+
+
+class BankError(Exception):
+    """Базовый класс для всех ошибок банковской системы."""
+
+
+class InvalidOperationError(BankError):
+    """Некорректная операция или некорректные входные данные."""
+
+
+class AccountFrozenError(BankError):
     """Операция запрещена: счёт заморожен."""
-    pass
 
 
-class AccountClosedError(Exception):
+class AccountClosedError(BankError):
     """Операция запрещена: счёт закрыт."""
-    pass
 
 
-class InvalidOperationError(Exception):
-    """Некорректная операция (например, неверная сумма)."""
-    pass
+class InsufficientFundsError(BankError):
+    """Недостаточно средств для списания."""
 
 
-class InsufficientFundsError(Exception):
-    """Недостаточно средств для снятия."""
-    pass
+class AccountNotFoundError(BankError):
+    """Счёт с указанным идентификатором не найден."""
 
 
-class UnderageClientError(Exception):
-    """Клиенту меньше минимально разрешённого возраста."""
-    pass
+class ClientNotFoundError(BankError):
+    """Клиент с указанным идентификатором не найден."""
 
 
-class ClientNotFoundError(Exception):
-    """Клиент с таким ID не найден в банке."""
-    pass
+class UnderageClientError(BankError):
+    """Клиент младше минимально допустимого возраста."""
 
 
-class AccountNotFoundError(Exception):
-    """Счёт с таким ID не найден в банке."""
-    pass
+class AuthenticationError(BankError):
+    """Неверные учётные данные."""
 
 
-class AuthenticationError(Exception):
-    """Неверный пароль при попытке входа."""
-    pass
+class ClientBlockedError(BankError):
+    """Клиент заблокирован после превышения числа попыток входа."""
 
 
-class ClientBlockedError(Exception):
-    """Клиент заблокирован (после 3 неверных попыток входа)."""
-    pass
+class NightOperationRestrictedError(BankError):
+    """Операции запрещены в ночное время."""
 
 
-class NightOperationRestrictedError(Exception):
-    """Операции запрещены в период с 00:00 до 05:00."""
-    pass
+class SuspiciousOperationBlockedError(BankError):
+    """Операция заблокирована как высокорискованная.
 
-
-class CurrencyConversionError(Exception):
-    """Не удалось получить курс конвертации между валютами."""
-    pass
-
-
-class TransactionNotFoundError(Exception):
-    """Транзакция с таким ID не найдена в очереди."""
-    pass
-
-class SuspiciousOperationBlockedError(Exception):
+    Состояние счёта при этом корректно: решение принято на основе
+    оценки риска, а не из-за статуса счёта или нехватки средств.
     """
-    Операция заблокирована банком как высокорискованная.
 
-    Отличие от остальных "постоянных" ошибок (AccountFrozenError и т.д.)
-    в том, что технически со счётом всё в порядке — деньги есть, счёт
-    активен. Блокировка происходит не из-за состояния счёта, а из-за
-    решения RiskAnalyzer (День 5): слишком много признаков подозрительности
-    сработало одновременно.
-    """
-    pass
+
+class CurrencyConversionError(BankError):
+    """Временная ошибка получения курса валют; операцию можно повторить."""
+
+
+class TransactionNotFoundError(BankError):
+    """Транзакция с указанным идентификатором не найдена в очереди."""
