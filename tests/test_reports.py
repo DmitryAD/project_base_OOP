@@ -73,6 +73,23 @@ class TestReportBuilderReportTypes(unittest.TestCase):
         self.assertEqual(report["report_type"], "risk")
         self.assertIn("total_events", report["summary"])
 
+    # === НОВОЕ ===
+    def test_to_text_contains_report_type_and_key_summary_field(self):
+        bank, alice, bob, log = make_bank_with_history()
+        builder = ReportBuilder(bank, transaction_log=log)
+        report = builder.build_client_report(alice.client_id)
+
+        text = builder.to_text(report)
+
+        # Проверяем не точное совпадение строки целиком (это было бы
+        # хрупко — сломалось бы от любой косметической правки
+        # форматирования в to_text()), а то, что ключевые данные
+        # физически присутствуют в тексте: тип отчёта и client_id,
+        # по которому строился отчёт.
+        self.assertIn(report["report_type"], text)
+        self.assertIn(alice.client_id, text)
+    # === КОНЕЦ НОВОГО ===
+
 
 class TestReportBuilderExports(unittest.TestCase):
 
