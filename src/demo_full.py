@@ -1,9 +1,18 @@
 """
 Сквозная демонстрация всего проекта: последовательно проходит по
-функциональности, реализованной за Дни 1-5. Каждый следующий день
-использует объекты (банк, клиентов, счета), созданные на предыдущих —
-это показывает, что слои системы работают ВМЕСТЕ, а не только
-по отдельности в своих собственных demo().
+функциональности, реализованной за Дни 1-7.
+
+Дни 1-5 используют ОДИН общий сценарий: один и тот же банк и одни и те
+же клиенты (Alice/Bob) передаются из функции в функцию — это
+показывает, что слои системы работают ВМЕСТЕ, а не только по
+отдельности в своих собственных demo().
+
+Дни 6-7 подключены как отдельный блок: run_day_6_demo() и
+run_day_7_demo() используют BankSimulation, который сам генерирует
+СВОИХ клиентов и случайные транзакции (с фиксированным seed - прогон
+воспроизводим). Это архитектурно другой сценарий, чем Alice/Bob из
+Дней 1-5, и намеренно не смешивается с ним - см. комментарий в начале
+reports.py про "ни один существующий файл не меняется".
 """
 
 from datetime import date, datetime
@@ -13,7 +22,8 @@ from exceptions import AccountFrozenError, SuspiciousOperationBlockedError
 from client import Client
 from bank import Bank
 from transaction import Transaction, TransactionType, TransactionQueue, TransactionProcessor
-
+from simulation import run_day_6_demo
+from reports import run_day_7_demo
 
 
 def demo_day_1_2():
@@ -175,8 +185,9 @@ def demo_day_5(bank: Bank, alice, alice_acc, processor):
     print(f"Риск-профиль рискованного клиента: {risky_bank.get_client_risk_profile(risky_client.client_id)}")
     print(f"Статистика ошибок обработки транзакций (данные Дня 4): {bank.get_error_statistics(processor.error_log)}")
 
+
 def run_full_demo():
-    print("ПОЛНАЯ ДЕМОНСТРАЦИЯ ПРОЕКТА (Дни 1-5)")
+    print("ПОЛНАЯ ДЕМОНСТРАЦИЯ ПРОЕКТА (Дни 1-7)")
 
     demo_day_1_2()
 
@@ -186,7 +197,22 @@ def run_full_demo():
     demo_day_5(bank, alice, alice_acc, processor)
 
     print("\n" + "=" * 60)
-    print("Готово: все 5 дней отработали в одном сквозном прогоне.")
+    print("Дни 1-5 отработали на одном общем сценарии (банк PyBank, Alice/Bob).")
+    print("=" * 60)
+
+    # === НОВОЕ: Дни 6-7 ===
+    # Отдельный блок демонстрации: BankSimulation генерирует СВОИХ
+    # клиентов и случайные транзакции (с фиксированным seed=42 внутри
+    # run_day_6_demo/run_day_7_demo — воспроизводимо), а не продолжает
+    # историю Alice/Bob из Дней 1-5. Оба вызова уже реализованы и
+    # протестированы отдельно (tests/test_simulation.py,
+    # tests/test_reports.py) — здесь просто подключаем их в общий прогон.
+    run_day_6_demo()
+    run_day_7_demo()
+    # === КОНЕЦ НОВОГО ===
+
+    print("\n" + "=" * 60)
+    print("Готово: все 7 дней отработали в одном сквозном прогоне.")
     print("=" * 60)
 
 
