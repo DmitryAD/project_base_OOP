@@ -1,134 +1,146 @@
-import sys
-import os
+import csv
 import json
+import os
+import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from bank import Bank
 from client import Client
-from transaction import Transaction, TransactionType, TransactionQueue, TransactionProcessor
-from reports import ReportBuilder
+from reports import ReportBuilder, ReportType
+from transaction import Transaction, TransactionProcessor, TransactionQueue, TransactionType
+
+Client.PBKDF2_ITERATIONS = 1_000
+
+DAYTIME = datetime(2026, 1, 1, 12, 0)
+
+
+def make_bank(now=DAYTIME, name="TestBank"):
+    """Банк с фиксированным временем, чтобы результат не зависел от часа запуска тестов."""
+    return Bank(name=name, time_provider=lambda: now)
+
+
+def make_client(bank, name="Тест Тестов", password="pass"):
+    return bank.add_client(Client(full_name=name, birth_date=date(1990, 1, 1), password=password))
+
+
+def open_funded_account(bank, client, amount=0, **account_options):
+    account = bank.open_account(client.client_id, **account_options)
+    if amount:
+        bank.deposit_to_account(account.account_id, amount)
+    return account
 
 
 def make_bank_with_history():
-    bank = Bank(name="ReportTestBank")
-    processor = TransactionProcessor(bank)
-
-    alice = bank.add_client(Client(full_name="Алина Волкова", birth_date=date(1990, 1, 1), password="pass"))
-    bob = bank.add_client(Client(full_name="Борис Николаев", birth_date=date(1988, 1, 1), password="pass"))
-
-    alice_acc = bank.open_account(alice.client_id, currency="RUB")
-    bob_acc = bank.open_account(bob.client_id, currency="RUB")
-    bank.deposit_to_account(alice_acc.get_account_info()["account_id"], 10000)
+    bank = make_bank(name="ReportTestBank")
+    alice = make_client(bank, "Алина Волкова")
+    bob = make_client(bank, "Борис Николаев")
+    alice_account = open_funded_account(bank, alice, 10000)
+    bob_account = open_funded_account(bank, bob)
 
     queue = TransactionQueue()
     queue.add(Transaction(
         TransactionType.INTERNAL_TRANSFER, 500,
-        sender_account_id=alice_acc.get_account_info()["account_id"],
-        receiver_account_id=bob_acc.get_account_info()["account_id"],
+        sender_account_id=alice_account.account_id,
+        receiver_account_id=bob_account.account_id,
     ))
     queue.add(Transaction(
         TransactionType.WITHDRAWAL, 50000,
-        sender_account_id=alice_acc.get_account_info()["account_id"],
-    ))  # заведомо упадёт — не хватит средств после перевода выше
+        sender_account_id=alice_account.account_id,
+    ))
 
-    transaction_log = []
-    while True:
-        t = queue.get_next()
-        if t is None:
-            break
-        processor.process(t)
-        transaction_log.append({"transaction": t, "status": t.status})
-
-    return bank, alice, bob, transaction_log
+    processor = TransactionProcessor(bank)
+    transactions = []
+    while (transaction := queue.get_next()) is not None:
+        processor.process(transaction)
+        transactions.append(transaction)
+    return bank, alice, bob, transactions
 
 
-class TestReportBuilderReportTypes(unittest.TestCase):
+class ReportTestCase(unittest.TestCase):
 
-    def test_build_client_report_structure(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_client_report(alice.client_id)
+    def setUp(self):
+        self.bank, self.alice, self.bob, transactions = make_bank_with_history()
+        self.builder = ReportBuilder(self.bank, transactions=transactions)
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.output = Path(self.tmp_dir.name)
 
-        self.assertEqual(report["report_type"], "client")
-        self.assertEqual(report["summary"]["client_id"], alice.client_id)
-        self.assertGreaterEqual(len(report["rows"]), 1)
+    def tearDown(self):
+        self.tmp_dir.cleanup()
 
-    def test_build_bank_report_contains_all_clients(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_bank_report()
 
-        self.assertEqual(report["report_type"], "bank")
+class TestReportBuilderReportTypes(ReportTestCase):
+
+    def test_client_report(self):
+        report = self.builder.build_client_report(self.alice.client_id)
+        self.assertEqual(report["report_type"], ReportType.CLIENT)
+        self.assertEqual(report["summary"]["client_id"], self.alice.client_id)
         self.assertEqual(len(report["rows"]), 2)
+        self.assertEqual(report["summary"]["balance_by_currency"], {"RUB": 9500})
 
-    def test_build_risk_report_structure(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_risk_report()
+    def test_bank_report(self):
+        report = self.builder.build_bank_report()
+        self.assertEqual(report["report_type"], ReportType.BANK)
+        self.assertEqual(len(report["rows"]), 2)
+        self.assertEqual(report["summary"]["transaction_statistics"], {"total": 2, "completed": 1, "failed": 1})
 
-        self.assertEqual(report["report_type"], "risk")
-        self.assertIn("total_events", report["summary"])
+    def test_risk_report(self):
+        report = self.builder.build_risk_report()
+        self.assertEqual(report["report_type"], ReportType.RISK)
+        self.assertEqual(report["summary"]["total_events"], len(report["rows"]))
 
-    # === НОВОЕ ===
-    def test_to_text_contains_report_type_and_key_summary_field(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_client_report(alice.client_id)
+    def test_report_without_transactions(self):
+        report = ReportBuilder(self.bank).build_client_report(self.alice.client_id)
+        self.assertEqual(report["rows"], [])
 
-        text = builder.to_text(report)
-
-        # Проверяем не точное совпадение строки целиком (это было бы
-        # хрупко — сломалось бы от любой косметической правки
-        # форматирования в to_text()), а то, что ключевые данные
-        # физически присутствуют в тексте: тип отчёта и client_id,
-        # по которому строился отчёт.
+    def test_to_text_contains_key_data(self):
+        report = self.builder.build_client_report(self.alice.client_id)
+        text = self.builder.to_text(report)
         self.assertIn(report["report_type"], text)
-        self.assertIn(alice.client_id, text)
-    # === КОНЕЦ НОВОГО ===
+        self.assertIn(self.alice.client_id, text)
 
 
-class TestReportBuilderExports(unittest.TestCase):
+class TestReportBuilderExports(ReportTestCase):
 
-    def test_export_to_json_creates_readable_file(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_bank_report()
+    def test_export_to_json(self):
+        report = self.builder.build_client_report(self.alice.client_id)
+        path = self.builder.export_to_json(report, self.output / "nested" / "client.json")
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["report_type"], ReportType.CLIENT)
+        self.assertEqual(loaded["rows"][0]["amount"], "500")
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            filepath = os.path.join(tmp_dir, "bank_report.json")
-            builder.export_to_json(report, filepath)
+    def test_export_to_csv(self):
+        report = self.builder.build_bank_report()
+        path = self.builder.export_to_csv(report, self.output / "bank.csv")
+        with path.open(encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["full_name"], "Алина Волкова")
 
-            with open(filepath, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            self.assertEqual(loaded["report_type"], "bank")
+    def test_export_empty_report_to_csv(self):
+        report = ReportBuilder(self.bank).build_client_report(self.bob.client_id)
+        path = self.builder.export_to_csv(report, self.output / "empty.csv")
+        self.assertEqual(path.read_text(encoding="utf-8"), "")
 
-    def test_export_to_csv_creates_file_with_header(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_bank_report()
+    def test_save_charts_for_every_report_type(self):
+        reports = [
+            self.builder.build_client_report(self.alice.client_id),
+            self.builder.build_bank_report(),
+            self.builder.build_risk_report(),
+        ]
+        for report in reports:
+            with self.subTest(report_type=report["report_type"]):
+                saved = self.builder.save_charts(report, self.output)
+                self.assertGreater(len(saved), 0)
+                self.assertTrue(all(path.exists() for path in saved))
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            filepath = os.path.join(tmp_dir, "bank_report.csv")
-            builder.export_to_csv(report, filepath)
-
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            self.assertIn("full_name", content)
-
-    def test_save_charts_creates_png_files(self):
-        bank, alice, bob, log = make_bank_with_history()
-        builder = ReportBuilder(bank, transaction_log=log)
-        report = builder.build_bank_report()
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            saved = builder.save_charts(report, output_dir=tmp_dir)
-            self.assertGreater(len(saved), 0)
-            for path in saved:
-                self.assertTrue(os.path.exists(path))
+    def test_balance_movement_uses_completed_transactions_only(self):
+        account_id = self.alice.account_ids[0]
+        self.assertEqual(self.builder.build_balance_movement(account_id), [-500.0])
 
 
 if __name__ == "__main__":
