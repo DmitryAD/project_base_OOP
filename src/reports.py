@@ -1,353 +1,296 @@
-"""
-День 7: система отчётности и визуализации.
-
-ReportBuilder строится ПОЛНОСТЬЮ поверх публичного API Bank (и,
-опционально, transaction_log из BankSimulation Дня 6) — ни один
-существующий файл не меняется.
-"""
+"""Отчёты по клиенту, банку и рискам: текст, JSON, CSV и графики. """
 
 import csv
 import json
-import os
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # headless-бэкенд: рисует прямо в файл, без окна.
-# Важно для CI и Codespaces — там нет графического дисплея, и обычный
-# бэкенд matplotlib попытался бы его найти и упал бы с ошибкой. "Agg" —
-# бэкенд, который просто рендерит картинку в PNG-файл, ничего не показывая.
 import matplotlib.pyplot as plt
 
-from transaction import TransactionStatus
+from transaction import TransactionStatus, filter_client_transactions
+
+matplotlib.use("Agg")
+
+
+class ReportType:
+    """Типы отчётов."""
+
+    CLIENT = "client"
+    BANK = "bank"
+    RISK = "risk"
 
 
 class ReportBuilder:
-    """
-    Строит отчёты трёх типов (по клиенту, по банку, по рискам) в виде
-    единообразного dict {"report_type", "generated_at", "summary", "rows"},
-    и умеет экспортировать их в текст, JSON, CSV и графики.
+    """Строит отчёты в едином формате и экспортирует их.
+
+    Каждый отчёт — словарь с ключами report_type, generated_at,
+    summary (сводные показатели) и rows (табличные строки).
+    Единая структура позволяет использовать одни и те же функции
+    экспорта для всех типов отчётов.
     """
 
-    def __init__(self, bank, transaction_log: list = None):
+    def __init__(self, bank, transactions: list | None = None):
         self.bank = bank
-        # transaction_log — необязательный: без него отчёты по клиенту/риску
-        # всё равно построятся (риск-профиль и подозрительные операции
-        # хранятся внутри самого Bank, в audit_log), просто "rows" с историей
-        # транзакций будут пустыми
-        self.transaction_log = transaction_log if transaction_log is not None else []
-
-    # ---------- построение отчётов ----------
+        self.transactions = transactions if transactions is not None else []
 
     def build_client_report(self, client_id: str) -> dict:
-        client = self.bank.clients[client_id]
-        accounts_info = [self.bank.get_account(aid).get_account_info() for aid in client.account_ids]
+        client = self.bank.get_client(client_id)
+        accounts = [account.get_account_info() for account in self.bank.get_client_accounts(client_id)]
 
-        balance_by_currency = {}
-        for info in accounts_info:
-            balance_by_currency[info["currency"]] = balance_by_currency.get(info["currency"], 0.0) + info["balance"]
+        balance_by_currency: dict = {}
+        for info in accounts:
+            balance_by_currency[info["currency"]] = (
+                balance_by_currency.get(info["currency"], 0) + info["balance"]
+            )
 
-        history_rows = []
-        for entry in self.transaction_log:
-            t = entry["transaction"]
-            sender_client = self.bank.get_client_id_for_account(t.sender_account_id) if t.sender_account_id else None
-            receiver_client = self.bank.get_client_id_for_account(t.receiver_account_id) if t.receiver_account_id else None
-            if client_id in (sender_client, receiver_client):
-                history_rows.append({
-                    "transaction_id": t.transaction_id,
-                    "type": t.transaction_type,
-                    "amount": t.amount,
-                    "fee": t.fee,
-                    "sender_account_id": t.sender_account_id,
-                    "receiver_account_id": t.receiver_account_id,
-                    "status": t.status,
-                })
-
-        return {
-            "report_type": "client",
-            "generated_at": datetime.now().isoformat(),
-            "summary": {
-                "client_id": client_id,
-                "full_name": client.full_name,
-                "status": client.status,
-                "accounts": accounts_info,
-                "balance_by_currency": balance_by_currency,
-                "risk_profile": self.bank.get_client_risk_profile(client_id),
-            },
-            "rows": history_rows,
-        }
-
-    def build_bank_report(self) -> dict:
-        ranking = self.bank.get_clients_ranking()
         rows = [
-            {"client_id": client.client_id, "full_name": client.full_name, "balance": total}
-            for client, total in ranking
+            {
+                "transaction_id": t.transaction_id,
+                "type": t.transaction_type,
+                "amount": t.amount,
+                "fee": t.fee,
+                "sender_account_id": t.sender_account_id,
+                "receiver_account_id": t.receiver_account_id,
+                "status": t.status,
+            }
+            for t in filter_client_transactions(self.transactions, self.bank, client_id)
         ]
 
-        stats = None
-        if self.transaction_log:
-            total = len(self.transaction_log)
-            completed = sum(1 for e in self.transaction_log if e["status"] == TransactionStatus.COMPLETED)
-            failed = sum(1 for e in self.transaction_log if e["status"] == TransactionStatus.FAILED)
-            stats = {"total": total, "completed": completed, "failed": failed}
+        return self._make_report(ReportType.CLIENT, {
+            "client_id": client_id,
+            "full_name": client.full_name,
+            "status": client.status,
+            "accounts": accounts,
+            "balance_by_currency": balance_by_currency,
+            "risk_profile": self.bank.get_client_risk_profile(client_id),
+        }, rows)
 
-        return {
-            "report_type": "bank",
-            "generated_at": datetime.now().isoformat(),
-            "summary": {
-                "bank_name": self.bank.name,
-                "num_clients": len(self.bank.clients),
-                "num_accounts": len(self.bank.accounts),
-                "total_balance_by_currency": self.bank.get_total_balance(),
-                "transaction_statistics": stats,
-            },
-            "rows": rows,
-        }
+    def build_bank_report(self, currency: str = "RUB") -> dict:
+        rows = [
+            {"client_id": client.client_id, "full_name": client.full_name, "balance": total}
+            for client, total in self.bank.get_clients_ranking(currency=currency)
+        ]
+
+        statistics = None
+        if self.transactions:
+            statistics = {
+                "total": len(self.transactions),
+                "completed": self._count_status(TransactionStatus.COMPLETED),
+                "failed": self._count_status(TransactionStatus.FAILED),
+            }
+
+        return self._make_report(ReportType.BANK, {
+            "bank_name": self.bank.name,
+            "ranking_currency": currency,
+            "num_clients": len(self.bank.clients),
+            "num_accounts": len(self.bank.accounts),
+            "total_balance_by_currency": self.bank.get_total_balance(),
+            "transaction_statistics": statistics,
+        }, rows)
 
     def build_risk_report(self) -> dict:
         events = self.bank.get_suspicious_operations_report()
         rows = [
             {
-                "event_id": e.event_id,
-                "timestamp": e.timestamp.isoformat(),
-                "severity": e.severity,
-                "client_id": e.client_id,
-                "message": e.message,
+                "event_id": event.event_id,
+                "timestamp": event.timestamp.isoformat(),
+                "severity": event.severity,
+                "category": event.category,
+                "client_id": event.client_id,
+                "message": event.message,
             }
-            for e in events
+            for event in events
         ]
+        by_severity: dict[str, int] = {}
+        for event in events:
+            by_severity[event.severity] = by_severity.get(event.severity, 0) + 1
 
-        by_severity = {}
-        for e in events:
-            by_severity[e.severity] = by_severity.get(e.severity, 0) + 1
+        return self._make_report(ReportType.RISK, {
+            "total_events": len(events),
+            "by_severity": by_severity,
+        }, rows)
 
+    @staticmethod
+    def _make_report(report_type: str, summary: dict, rows: list[dict]) -> dict:
         return {
-            "report_type": "risk",
-            "generated_at": datetime.now().isoformat(),
-            "summary": {
-                "total_events": len(events),
-                "by_severity": by_severity,
-            },
+            "report_type": report_type,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "summary": summary,
             "rows": rows,
         }
 
-    # ---------- текстовый формат ----------
+    def _count_status(self, status: str) -> int:
+        return sum(1 for t in self.transactions if t.status == status)
 
-    def to_text(self, report: dict) -> str:
-        lines = [f"=== Отчёт: {report['report_type']} ===", f"Сформирован: {report['generated_at']}", ""]
-        lines.append("-- Сводка --")
+    @staticmethod
+    def to_text(report: dict) -> str:
+        lines = [
+            f"=== Отчёт: {report['report_type']} ===",
+            f"Сформирован: {report['generated_at']}",
+            "",
+            "-- Сводка --",
+        ]
         for key, value in report["summary"].items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False, default=str)
             lines.append(f"{key}: {value}")
-        lines.append("")
-        lines.append(f"-- Детали ({len(report['rows'])} строк) --")
-        for row in report["rows"]:
-            lines.append(str(row))
+        lines += ["", f"-- Детали ({len(report['rows'])} строк) --"]
+        lines += [json.dumps(row, ensure_ascii=False, default=str) for row in report["rows"]]
         return "\n".join(lines)
 
-    # ---------- экспорт ----------
+    @staticmethod
+    def export_to_json(report: dict, filepath) -> Path:
+        """Сохраняет отчёт в JSON; default=str сериализует Decimal и datetime."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(report, file, ensure_ascii=False, indent=2, default=str)
+        return path
 
-    def export_to_json(self, report: dict, filepath: str):
-        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-        """
-        default=str — подстраховка для json.dump: если в отчёте случайно
-        останется значение, которое json не умеет сериализовать "из
-        коробки" (например, объект datetime вместо уже готовой строки),
-        json не упадёт с TypeError, а просто вызовет str() на нём.
-        """
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+    @staticmethod
+    def export_to_csv(report: dict, filepath) -> Path:
+        """Сохраняет строки отчёта в CSV.
 
-    def export_to_csv(self, report: dict, filepath: str):
-        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+        Набор колонок собирается из всех строк в порядке первого появления
+        ключа, поэтому строки с разным набором полей не ломают запись.
+        newline="" обязателен для модуля csv, иначе в Windows появляются
+        пустые строки между записями.
+        """
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
         rows = report["rows"]
-        if not rows:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write("")
-            return
+        fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+        with path.open("w", encoding="utf-8", newline="") as file:
+            if fieldnames:
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        return path
 
-        """
-        dict.fromkeys-подобный трюк: собираем список ключей БЕЗ
-        дубликатов, сохраняя порядок первого появления (обычные dict
-        в Python 3.7+ гарантированно хранят порядок вставки). Так мы
-        получаем полный набор колонок, даже если у разных строк отчёта
-        чуть отличается набор ключей — иначе csv.DictWriter упал бы на
-        строке с "лишним" или отсутствующим ключом.
-        """
-        fieldnames = []
-        seen = set()
-        for row in rows:
-            for key in row:
-                if key not in seen:
-                    fieldnames.append(key)
-                    seen.add(key)
+    def save_charts(self, report: dict, output_dir="reports_output/charts") -> list[Path]:
+        """Строит графики для отчёта и возвращает пути к сохранённым файлам."""
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        builders = {
+            ReportType.BANK: self._bank_charts,
+            ReportType.RISK: self._risk_charts,
+            ReportType.CLIENT: self._client_charts,
+        }
+        return builders[report["report_type"]](report, directory)
 
-        # newline="" — без этого на Windows csv-модуль добавляет лишние
-        # пустые строки между записями (особенность построчных концов
-        # файла в разных ОС)
-        with open(filepath, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
+    def _bank_charts(self, report: dict, directory: Path) -> list[Path]:
+        saved = []
+        balance = report["summary"]["total_balance_by_currency"]
+        positive = {currency: value for currency, value in balance.items() if value > 0}
+        if positive:
+            saved.append(self._save_pie_chart(
+                positive, "Баланс банка по валютам", directory / "bank_balance_by_currency_pie.png",
+            ))
+        top_rows = report["rows"][:10]
+        if top_rows:
+            currency = report["summary"]["ranking_currency"]
+            saved.append(self._save_bar_chart(
+                {row["full_name"]: row["balance"] for row in top_rows},
+                f"Баланс клиентов ({currency})", "Клиент", "Баланс",
+                directory / "bank_clients_balance_bar.png",
+            ))
+        return saved
 
-    # ---------- графики ----------
+    def _risk_charts(self, report: dict, directory: Path) -> list[Path]:
+        saved = []
+        by_severity = report["summary"]["by_severity"]
+        if by_severity:
+            saved.append(self._save_pie_chart(
+                by_severity, "Подозрительные события по важности", directory / "risk_severity_pie.png",
+            ))
+        by_client: dict[str, int] = {}
+        for row in report["rows"]:
+            key = row["client_id"] or "—"
+            by_client[key] = by_client.get(key, 0) + 1
+        if by_client:
+            saved.append(self._save_bar_chart(
+                by_client, "Подозрительные события по клиентам", "Клиент", "Количество",
+                directory / "risk_by_client_bar.png",
+            ))
+        return saved
 
-    def _save_pie_chart(self, labels, values, title, filepath):
-        plt.figure(figsize=(6, 6))
-        plt.pie(values, labels=labels, autopct="%1.1f%%")
-        plt.title(title)
-        plt.savefig(filepath, bbox_inches="tight")
-        plt.close()
+    def _client_charts(self, report: dict, directory: Path) -> list[Path]:
+        saved = []
+        client_id = report["summary"]["client_id"]
+        by_type: dict[str, int] = {}
+        for row in report["rows"]:
+            by_type[row["type"]] = by_type.get(row["type"], 0) + 1
+        if by_type:
+            saved.append(self._save_bar_chart(
+                by_type, "Операции клиента по типам", "Тип", "Количество",
+                directory / f"client_{client_id}_types_bar.png",
+            ))
+        accounts = report["summary"]["accounts"]
+        if accounts:
+            timeline = self.build_balance_movement(accounts[0]["account_id"])
+            if timeline:
+                saved.append(self._save_line_chart(
+                    timeline, "Движение баланса счёта", "Операция №", "Накопленное изменение",
+                    directory / f"client_{client_id}_balance_line.png",
+                ))
+        return saved
 
-    def _save_bar_chart(self, labels, values, title, xlabel, ylabel, filepath):
-        plt.figure(figsize=(8, 5))
-        plt.bar(labels, values)
-        plt.title(title)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.xticks(rotation=30, ha="right")
-        plt.tight_layout()
-        plt.savefig(filepath)
-        plt.close()
+    def build_balance_movement(self, account_id: str) -> list[float]:
+        """Накопленное изменение баланса счёта по успешным транзакциям.
 
-    def _save_line_chart(self, values, title, xlabel, ylabel, filepath):
-        plt.figure(figsize=(8, 5))
-        plt.plot(range(1, len(values) + 1), values, marker="o")
-        plt.axhline(0, linewidth=0.8)
-        plt.title(title)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.tight_layout()
-        plt.savefig(filepath)
-        plt.close()
-
-    def _build_balance_movement(self, account_id: str) -> list:
-        """
-        Строит временной ряд ДВИЖЕНИЯ баланса одного счёта — не
-        абсолютное значение! Суммарное изменение от транзакций, начиная
-        с условного нуля, в порядке их обработки. Это НЕ реальный баланс
-        счёта (у которого мог быть ненулевой старт при открытии, минуя
-        TransactionProcessor) — это график ТРЕНДА: растёт баланс или
-        падает и насколько резко. Для точного текущего значения смотри
-        account.get_account_info()["balance"].
+        Отсчёт идёт от нуля, поэтому ряд показывает тренд, а не
+        абсолютный баланс: начальные пополнения в обход обработчика
+        транзакций в него не входят. Зачисление при переводе между
+        валютами учитывается в валюте отправителя.
         """
         movement = 0.0
         timeline = []
-        for entry in self.transaction_log:
-            t = entry["transaction"]
-            if t.status != TransactionStatus.COMPLETED:
+        for transaction in self.transactions:
+            if transaction.status != TransactionStatus.COMPLETED:
                 continue
             changed = False
-            if t.receiver_account_id == account_id:
-                movement += t.amount
+            if transaction.receiver_account_id == account_id:
+                movement += float(transaction.amount)
                 changed = True
-            if t.sender_account_id == account_id:
-                movement -= (t.amount + t.fee)
+            if transaction.sender_account_id == account_id:
+                movement -= float(transaction.amount + transaction.fee)
                 changed = True
             if changed:
                 timeline.append(movement)
         return timeline
 
-    def save_charts(self, report: dict, output_dir: str = "reports_output/charts") -> list:
-        """
-        Строит графики, подходящие конкретному типу отчёта, и сохраняет
-        их в output_dir. Возвращает список путей к сохранённым файлам —
-        удобно и для демонстрации, и для тестов (проверить, что файлы
-        реально появились на диске).
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        saved_files = []
-        report_type = report["report_type"]
+    @staticmethod
+    def _save_pie_chart(data: dict, title: str, path: Path) -> Path:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.pie([float(value) for value in data.values()], labels=list(data), autopct="%1.1f%%")
+        ax.set_title(title)
+        fig.savefig(path, bbox_inches="tight")
+        plt.close(fig)
+        return path
 
-        if report_type == "bank":
-            balance = report["summary"]["total_balance_by_currency"]
-            if balance:
-                path = os.path.join(output_dir, "bank_balance_by_currency_pie.png")
-                self._save_pie_chart(list(balance.keys()), list(balance.values()), "Баланс банка по валютам", path)
-                saved_files.append(path)
+    @staticmethod
+    def _save_bar_chart(data: dict, title: str, xlabel: str, ylabel: str, path: Path) -> Path:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.bar(list(data), [float(value) for value in data.values()])
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.tick_params(axis="x", labelrotation=30)
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
+        return path
 
-            top_rows = report["rows"][:10]
-            if top_rows:
-                labels = [r["full_name"] for r in top_rows]
-                values = [r["balance"] for r in top_rows]
-                path = os.path.join(output_dir, "bank_clients_balance_bar.png")
-                self._save_bar_chart(labels, values, "Баланс клиентов (RUB)", "Клиент", "Баланс", path)
-                saved_files.append(path)
-
-        elif report_type == "risk":
-            by_severity = report["summary"]["by_severity"]
-            if by_severity:
-                path = os.path.join(output_dir, "risk_severity_pie.png")
-                self._save_pie_chart(list(by_severity.keys()), list(by_severity.values()), "Подозрительные операции по важности", path)
-                saved_files.append(path)
-
-            by_client = {}
-            for row in report["rows"]:
-                by_client[row["client_id"]] = by_client.get(row["client_id"], 0) + 1
-            if by_client:
-                path = os.path.join(output_dir, "risk_by_client_bar.png")
-                self._save_bar_chart(list(by_client.keys()), list(by_client.values()), "Подозрительные операции по клиентам", "Клиент", "Количество", path)
-                saved_files.append(path)
-
-        elif report_type == "client":
-            by_type = {}
-            for row in report["rows"]:
-                by_type[row["type"]] = by_type.get(row["type"], 0) + 1
-            if by_type:
-                path = os.path.join(output_dir, f"client_{report['summary']['client_id']}_types_bar.png")
-                self._save_bar_chart(list(by_type.keys()), list(by_type.values()), "Операции клиента по типам", "Тип", "Количество", path)
-                saved_files.append(path)
-
-            accounts = report["summary"]["accounts"]
-            if accounts:
-                account_id = accounts[0]["account_id"]
-                timeline = self._build_balance_movement(account_id)
-                if timeline:
-                    path = os.path.join(output_dir, f"client_{report['summary']['client_id']}_balance_line.png")
-                    self._save_line_chart(timeline, "Движение баланса счёта", "Операция №", "Накопленное изменение", path)
-                    saved_files.append(path)
-
-        return saved_files
-
-
-def run_day_7_demo():
-    from simulation import BankSimulation
-
-    print("=" * 60)
-    print("ДЕНЬ 7: Отчётность и визуализация")
-    print("=" * 60)
-
-    sim = BankSimulation(num_clients=8, num_accounts=12, num_transactions=40, seed=42)
-    sim.generate_clients()
-    sim.generate_accounts()
-    sim.run_transactions()
-
-    builder = ReportBuilder(sim.bank, transaction_log=sim.transaction_log)
-    sample_client = max(sim.clients, key=lambda c: len(sim.get_client_transaction_history(c.client_id)))
-
-    client_report = builder.build_client_report(sample_client.client_id)
-    bank_report = builder.build_bank_report()
-    risk_report = builder.build_risk_report()
-
-    print("\n" + builder.to_text(client_report))
-    print("\n" + builder.to_text(bank_report))
-    print("\n" + builder.to_text(risk_report))
-
-    output_dir = "reports_output"
-    builder.export_to_json(client_report, os.path.join(output_dir, "client_report.json"))
-    builder.export_to_csv(client_report, os.path.join(output_dir, "client_report.csv"))
-    builder.export_to_json(bank_report, os.path.join(output_dir, "bank_report.json"))
-    builder.export_to_csv(bank_report, os.path.join(output_dir, "bank_report.csv"))
-    builder.export_to_json(risk_report, os.path.join(output_dir, "risk_report.json"))
-    builder.export_to_csv(risk_report, os.path.join(output_dir, "risk_report.csv"))
-
-    chart_dir = os.path.join(output_dir, "charts")
-    saved_charts = []
-    saved_charts += builder.save_charts(client_report, chart_dir)
-    saved_charts += builder.save_charts(bank_report, chart_dir)
-    saved_charts += builder.save_charts(risk_report, chart_dir)
-
-    print(f"\nОтчёты сохранены в: {output_dir}/")
-    print(f"Графики сохранены: {saved_charts}")
-
-
-if __name__ == "__main__":
-    run_day_7_demo()
+    @staticmethod
+    def _save_line_chart(values: list[float], title: str, xlabel: str, ylabel: str, path: Path) -> Path:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(range(1, len(values) + 1), values, marker="o")
+        ax.axhline(0, linewidth=0.8)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
+        return path
