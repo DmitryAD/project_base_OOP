@@ -1,220 +1,205 @@
-"""
-Сквозная демонстрация всего проекта: последовательно проходит по
-функциональности, реализованной за Дни 1-7.
+"""Сквозная демонстрация возможностей PyBank."""
 
-Дни 1-5 используют ОДИН общий сценарий: один и тот же банк и одни и те
-же клиенты (Alice/Bob) передаются из функции в функцию — это
-показывает, что слои системы работают ВМЕСТЕ, а не только по
-отдельности в своих собственных demo().
-
-Дни 6-7 подключены как отдельный блок: run_day_6_demo() и
-run_day_7_demo() используют BankSimulation, который сам генерирует
-СВОИХ клиентов и случайные транзакции (с фиксированным seed - прогон
-воспроизводим). Это архитектурно другой сценарий, чем Alice/Bob из
-Дней 1-5, и намеренно не смешивается с ним - см. комментарий в начале
-reports.py про "ни один существующий файл не меняется".
-"""
-
+import logging
 from datetime import date, datetime
+from pathlib import Path
 
-from main import BankAccount, SavingsAccount, PremiumAccount, InvestmentAccount
-from exceptions import AccountFrozenError, SuspiciousOperationBlockedError
-from client import Client
 from bank import Bank
-from transaction import Transaction, TransactionType, TransactionQueue, TransactionProcessor
-from simulation import run_day_6_demo
-from reports import run_day_7_demo
+from client import Client
+from exceptions import AccountFrozenError, AuthenticationError, SuspiciousOperationBlockedError
+from main import BankAccount, InvestmentAccount, PremiumAccount, SavingsAccount
+from reports import ReportBuilder
+from simulation import BankSimulation
+from transaction import Transaction, TransactionProcessor, TransactionQueue, TransactionType
+
+DAYTIME = datetime(2026, 1, 1, 12, 0)
+REPORTS_DIR = Path("reports_output")
 
 
-def demo_day_1_2():
-    """Дни 1-2: базовый счёт и три его подтипа с полиморфным поведением."""
-    print("\n" + "=" * 60)
-    print("ДЕНЬ 1-2: Базовые счета и их подтипы")
-    print("=" * 60)
+def format_amounts(amounts: dict) -> str:
+    return ", ".join(f"{key}: {value}" for key, value in amounts.items())
 
-    acc = BankAccount(owner="Иван Иванов", currency="RUB")
-    acc.deposit(1000)
-    acc.withdraw(300)
-    print(acc)
 
-    acc.freeze()
+def print_header(title: str):
+    print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
+
+
+def demo_accounts():
+    print_header("Счета и их типы")
+
+    account = BankAccount(owner="Иван Иванов", currency="RUB")
+    account.deposit(1000)
+    account.withdraw(300)
+    print(account)
+
+    account.freeze()
     try:
-        acc.deposit(100)
-    except AccountFrozenError as e:
-        print(f"Операция над замороженным счётом отклонена (ожидаемо): {e}")
-    acc.unfreeze()
+        account.deposit(100)
+    except AccountFrozenError as error:
+        print(f"Операция по замороженному счёту отклонена: {error}")
+    account.unfreeze()
 
     savings = SavingsAccount(owner="Анна Смирнова", currency="RUB", min_balance=1000, monthly_rate=0.03)
     savings.deposit(5000)
-    print(f"Начислены проценты по накопительному счёту: {savings.apply_monthly_interest():.2f}")
+    print(f"Начислены проценты: {savings.apply_monthly_interest()}")
     print(savings)
 
     premium = PremiumAccount(owner="Олег Кузнецов", currency="USD", overdraft_limit=1000, withdrawal_fee=10)
     premium.deposit(200)
-    premium.withdraw(500)  # уйдёт в минус за счёт овердрафта — разрешено для Premium
+    premium.withdraw(500)
     print(premium)
 
-    invest = InvestmentAccount(owner="Мария Петрова", currency="RUB")
-    invest.deposit(10000)
-    invest.buy_asset("stocks", 4000)
-    print(invest)
-    print(f"Прогноз роста портфеля через год: {invest.project_yearly_growth()}")
+    investment = InvestmentAccount(owner="Мария Петрова", currency="RUB")
+    investment.deposit(10000)
+    investment.buy_asset("stocks", 4000)
+    print(investment)
+    print(f"Прогноз портфеля через год: {format_amounts(investment.project_yearly_growth())}")
 
 
-def demo_day_3(bank: Bank):
-    """День 3: клиенты, счета через Bank, аутентификация, статистика."""
-    print("\n" + "=" * 60)
-    print("ДЕНЬ 3: Bank, клиенты, аутентификация")
-    print("=" * 60)
+def demo_bank(bank: Bank) -> dict:
+    print_header("Банк, клиенты и аутентификация")
 
     alice = bank.add_client(Client(
         full_name="Алина Волкова", birth_date=date(1995, 6, 20),
-        phone="+79990000001", email="alina@example.com", password="qwerty",
+        password="qwerty", phone="+79990000001", email="alina@example.com",
     ))
     bob = bank.add_client(Client(full_name="Борис Николаев", birth_date=date(1988, 3, 15), password="secret"))
-    print(f"Добавлены клиенты: {alice.full_name}, {bob.full_name}")
+    print(f"Клиенты: {alice.full_name}, {bob.full_name}")
 
-    alice_acc = bank.open_account(alice.client_id, account_type="bank", currency="RUB")
-    alice_usd_acc = bank.open_account(alice.client_id, account_type="premium", currency="USD", overdraft_limit=500)
-    bob_acc = bank.open_account(bob.client_id, account_type="bank", currency="RUB")
+    accounts = {
+        "alice_rub": bank.open_account(alice.client_id, account_type="bank", currency="RUB"),
+        "alice_usd": bank.open_account(alice.client_id, account_type="premium", currency="USD", overdraft_limit=500),
+        "bob_rub": bank.open_account(bob.client_id, account_type="bank", currency="RUB"),
+    }
+    bank.deposit_to_account(accounts["alice_rub"].account_id, 50000)
+    bank.deposit_to_account(accounts["alice_usd"].account_id, 1000)
+    bank.deposit_to_account(accounts["bob_rub"].account_id, 5000)
+    print(f"Общий баланс банка: {format_amounts(bank.get_total_balance())}")
 
-    bank.deposit_to_account(alice_acc.get_account_info()["account_id"], 50000)
-    bank.deposit_to_account(alice_usd_acc.get_account_info()["account_id"], 1000)
-    bank.deposit_to_account(bob_acc.get_account_info()["account_id"], 5000)
-    print(f"Счета открыты и пополнены. Общий баланс банка по валютам: {bank.get_total_balance()}")
-
-    print("Попытка входа с неверным паролем:")
     try:
         bank.authenticate_client(alice.client_id, "wrong-password")
-    except Exception as e:
-        print(f"  Ошибка (ожидаемо): {e}")
-    ok = bank.authenticate_client(alice.client_id, "qwerty")
-    print(f"Вход с верным паролем: {ok}")
+    except AuthenticationError as error:
+        print(f"Вход с неверным паролем: {error}")
+    print(f"Вход с верным паролем: {bank.authenticate_client(alice.client_id, 'qwerty')}")
 
-    ranking = bank.get_clients_ranking()
-    print("Рейтинг клиентов по балансу (RUB):")
-    for client, total in ranking:
-        print(f"  {client.full_name}: {total:.2f}")
+    print("Рейтинг клиентов (RUB):")
+    for client, total in bank.get_clients_ranking():
+        print(f"  {client.full_name}: {total}")
 
-    return alice, bob, alice_acc, alice_usd_acc, bob_acc
+    return {"alice": alice, "bob": bob, **accounts}
 
 
-def demo_day_4(bank: Bank, alice, bob, alice_acc, alice_usd_acc, bob_acc):
-    """День 4: очередь транзакций с приоритетами и их обработка."""
-    print("\n" + "=" * 60)
-    print("ДЕНЬ 4: Очередь и обработка транзакций")
-    print("=" * 60)
+def demo_transactions(bank: Bank, context: dict) -> TransactionProcessor:
+    print_header("Очередь и обработка транзакций")
 
-    processor = TransactionProcessor(bank)
-    alice_id = alice_acc.get_account_info()["account_id"]
-    alice_usd_id = alice_usd_acc.get_account_info()["account_id"]
-    bob_id = bob_acc.get_account_info()["account_id"]
-
-    # разные типы и приоритеты — чтобы показать, что очередь реально
-    # обрабатывает их не в порядке добавления, а по приоритету (heapq)
-    transactions = [
-        Transaction(TransactionType.DEPOSIT, 1000, receiver_account_id=alice_id, priority=1),
-        Transaction(TransactionType.WITHDRAWAL, 200, sender_account_id=bob_id, priority=1),
-        Transaction(TransactionType.INTERNAL_TRANSFER, 2000, sender_account_id=alice_id, receiver_account_id=bob_id, priority=5),
-        Transaction(TransactionType.EXTERNAL_TRANSFER, 3000, sender_account_id=alice_id, receiver_account_id=bob_id, priority=3),
-        Transaction(TransactionType.INTERNAL_TRANSFER, 300, sender_account_id=alice_usd_id, receiver_account_id=bob_id, priority=4),
-        Transaction(TransactionType.DEPOSIT, 500, receiver_account_id=bob_id, priority=10),  # высокий приоритет — почти первая в очереди
-    ]
+    alice_rub = context["alice_rub"].account_id
+    alice_usd = context["alice_usd"].account_id
+    bob_rub = context["bob_rub"].account_id
 
     queue = TransactionQueue()
-    for t in transactions:
-        queue.add(t)
+    for transaction in (
+        Transaction(TransactionType.DEPOSIT, 1000, receiver_account_id=alice_rub, priority=1),
+        Transaction(TransactionType.WITHDRAWAL, 200, sender_account_id=bob_rub, priority=1),
+        Transaction(TransactionType.INTERNAL_TRANSFER, 2000, sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=5),
+        Transaction(TransactionType.EXTERNAL_TRANSFER, 3000, sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=3),
+        Transaction(TransactionType.INTERNAL_TRANSFER, 300, sender_account_id=alice_usd, receiver_account_id=bob_rub, priority=4),
+        Transaction(TransactionType.DEPOSIT, 500, receiver_account_id=bob_rub, priority=10),
+    ):
+        queue.add(transaction)
 
-    print(f"В очереди {len(queue)} транзакций. Обрабатываем по приоритету:")
-    processed = 0
-    while True:
-        t = queue.get_next()
-        if t is None:
-            break
-        processor.process(t)
-        print(f"  {t}")
-        processed += 1
-
-    print(f"Обработано транзакций: {processed}. Ошибок в логе процессора: {len(processor.error_log)}")
+    processor = TransactionProcessor(bank)
+    print(f"В очереди {len(queue)} транзакций, обработка по приоритету:")
+    while (transaction := queue.get_next()) is not None:
+        processor.process(transaction)
+        print(f"  {transaction}")
+    print(f"Ошибок обработки: {len(processor.error_log)}")
     return processor
 
 
-def demo_day_5(bank: Bank, alice, alice_acc, processor):
-    """День 5: риск-анализ и аудит поверх операций."""
-    print("\n" + "=" * 60)
-    print("ДЕНЬ 5: Аудит и анализ рисков")
-    print("=" * 60)
+def demo_risk(bank: Bank, context: dict, processor: TransactionProcessor):
+    print_header("Аудит и анализ рисков")
 
-    print("Обычная небольшая операция (не должна блокироваться):")
-    bank.withdraw_from_account(alice_acc.get_account_info()["account_id"], alice.client_id, 100)
-    print("  прошло без блокировки")
+    bank.withdraw_from_account(context["alice_rub"].account_id, context["alice"].client_id, 100)
+    print("Обычное снятие выполнено без блокировки")
 
-    print("\nИмитация высокорискованной операции (частые операции + крупная сумма):")
+    risky_bank = Bank(name="RiskBank", time_provider=lambda: DAYTIME)
+    client = risky_bank.add_client(Client(
+        full_name="Павел Орлов", birth_date=date(1990, 1, 1), password="risk-demo",
+    ))
+    account = risky_bank.open_account(client.client_id, max_transaction_limit=2_000_000)
+    risky_bank.deposit_to_account(account.account_id, 1_000_000)
 
-    # фиксированное дневное время — чтобы демо не зависело от того,
-    # в какой момент реально запущен скрипт (иначе, если контейнер
-    # окажется в поясе, где сейчас ночь по UTC, ночной хардблок Дня 3
-    # сработает и здесь, испортив демонстрацию)
-    risky_bank = Bank(name="RiskBank", time_provider=lambda: datetime(2026, 1, 1, 12, 0))
-    risky_client = risky_bank.add_client(Client(full_name="Рискованный Клиент", birth_date=date(1990, 1, 1)))
-
-    # max_transaction_limit=2_000_000 — иначе сработает лимит на ОДНУ
-    # операцию (День 1-2, по умолчанию 100_000 для обычного BankAccount)
-    risky_acc = risky_bank.open_account(
-        risky_client.client_id, account_type="bank", max_transaction_limit=2_000_000.0,
-    )
-    account_id = risky_acc.get_account_info()["account_id"]
-    risky_bank.deposit_to_account(account_id, 1_000_000)
-
-    # "разгоняем" признак "частые операции": 5 небольших снятий подряд.
-    # Каждое из них само по себе низкорискованное (0 признаков — LOW),
-    # но RiskAnalyzer считает их ВМЕСТЕ по истории клиента — и уже
-    # 6-я операция увидит "позади" 5 операций за последние 10 минут.
     for _ in range(5):
-        risky_bank.withdraw_from_account(account_id, risky_client.client_id, 100)
-
-    # 6-я операция: срабатывают сразу ДВА признака одновременно —
-    # "частые операции" (только что было 5 подряд) И "крупная сумма"
-    # (> 500_000) => 2 признака => HIGH => блокировка
+        risky_bank.withdraw_from_account(account.account_id, client.client_id, 100)
     try:
-        risky_bank.withdraw_from_account(account_id, risky_client.client_id, 600000)
-    except SuspiciousOperationBlockedError as e:
-        print(f"  Заблокировано: {e}")
+        risky_bank.withdraw_from_account(account.account_id, client.client_id, 600_000)
+    except SuspiciousOperationBlockedError as error:
+        print(f"Заблокировано: {error}")
 
-    print(f"\nОтчёт по подозрительным операциям: {len(risky_bank.get_suspicious_operations_report())} событий")
-    print(f"Риск-профиль рискованного клиента: {risky_bank.get_client_risk_profile(risky_client.client_id)}")
-    print(f"Статистика ошибок обработки транзакций (данные Дня 4): {bank.get_error_statistics(processor.error_log)}")
+    print(f"Подозрительных событий: {len(risky_bank.get_suspicious_operations_report())}")
+    print(f"Риск-профиль клиента: {risky_bank.get_client_risk_profile(client.client_id)}")
+    print(f"Статистика ошибок обработки: {bank.get_error_statistics(processor.error_log)}")
 
 
-def run_full_demo():
-    print("ПОЛНАЯ ДЕМОНСТРАЦИЯ ПРОЕКТА (Дни 1-7)")
+def demo_simulation() -> BankSimulation:
+    print_header("Симуляция нагрузки")
 
-    demo_day_1_2()
+    simulation = BankSimulation(
+        num_clients=8, num_accounts=12, num_transactions=40, seed=42,
+        time_provider=lambda: DAYTIME,
+    ).run()
 
-    bank = Bank(name="PyBank")
-    alice, bob, alice_acc, alice_usd_acc, bob_acc = demo_day_3(bank)
-    processor = demo_day_4(bank, alice, bob, alice_acc, alice_usd_acc, bob_acc)
-    demo_day_5(bank, alice, alice_acc, processor)
+    client = simulation.get_most_active_client()
+    print(f"\nСчета клиента {client.full_name}:")
+    for account in simulation.get_client_accounts(client.client_id):
+        print(f"  {account}")
 
-    print("\n" + "=" * 60)
-    print("Дни 1-5 отработали на одном общем сценарии (банк PyBank, Alice/Bob).")
-    print("=" * 60)
+    history = simulation.get_client_transaction_history(client.client_id)
+    print(f"История операций ({len(history)}):")
+    for transaction in history:
+        print(f"  {transaction}")
+    print(f"Риск-профиль: {simulation.get_client_risk_profile(client.client_id)}")
 
-    # === НОВОЕ: Дни 6-7 ===
-    # Отдельный блок демонстрации: BankSimulation генерирует СВОИХ
-    # клиентов и случайные транзакции (с фиксированным seed=42 внутри
-    # run_day_6_demo/run_day_7_demo — воспроизводимо), а не продолжает
-    # историю Alice/Bob из Дней 1-5. Оба вызова уже реализованы и
-    # протестированы отдельно (tests/test_simulation.py,
-    # tests/test_reports.py) — здесь просто подключаем их в общий прогон.
-    run_day_6_demo()
-    run_day_7_demo()
-    # === КОНЕЦ НОВОГО ===
+    print("\nТоп-3 клиентов по балансу (RUB):")
+    for top_client, total in simulation.get_top_clients(3):
+        print(f"  {top_client.full_name}: {total}")
+    print(f"Статистика транзакций: {simulation.get_transaction_statistics()}")
+    print(f"Общий баланс банка: {format_amounts(simulation.get_total_balance())}")
+    return simulation
 
-    print("\n" + "=" * 60)
-    print("Готово: все 7 дней отработали в одном сквозном прогоне.")
-    print("=" * 60)
+
+def demo_reports(simulation: BankSimulation):
+    print_header("Отчёты и графики")
+
+    builder = ReportBuilder(simulation.bank, transactions=simulation.transactions)
+    client = simulation.get_most_active_client()
+    reports = {
+        "client": builder.build_client_report(client.client_id),
+        "bank": builder.build_bank_report(),
+        "risk": builder.build_risk_report(),
+    }
+
+    saved_files = []
+    for name, report in reports.items():
+        print(f"\n{builder.to_text(report)}")
+        saved_files.append(builder.export_to_json(report, REPORTS_DIR / f"{name}_report.json"))
+        saved_files.append(builder.export_to_csv(report, REPORTS_DIR / f"{name}_report.csv"))
+        saved_files += builder.save_charts(report, REPORTS_DIR / "charts")
+
+    print(f"\nСохранено файлов: {len(saved_files)} в каталоге {REPORTS_DIR}/")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    demo_accounts()
+    bank = Bank(name="PyBank", time_provider=lambda: DAYTIME)
+    context = demo_bank(bank)
+    processor = demo_transactions(bank, context)
+    demo_risk(bank, context, processor)
+    simulation = demo_simulation()
+    demo_reports(simulation)
 
 
 if __name__ == "__main__":
-    run_full_demo()
+    main()
