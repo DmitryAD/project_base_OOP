@@ -12,13 +12,13 @@ from exceptions import (
     InvalidOperationError,
     TransactionNotFoundError,
 )
+from main import default_rate_provider
 from transaction import (
     Transaction,
     TransactionProcessor,
     TransactionQueue,
     TransactionStatus,
     TransactionType,
-    default_rate_provider,
 )
 
 Client.PBKDF2_ITERATIONS = 1_000
@@ -60,6 +60,10 @@ class TestTransaction(unittest.TestCase):
             Transaction(TransactionType.WITHDRAWAL, 100)
         with self.assertRaises(InvalidOperationError):
             Transaction(TransactionType.INTERNAL_TRANSFER, 100, sender_account_id="a")
+
+    def test_amount_is_rounded_to_cents(self):
+        self.assertEqual(str(deposit(amount=1778).amount), "1778.00")
+        self.assertEqual(str(deposit(amount=10.005).amount), "10.01")
 
     def test_transfer_to_same_account(self):
         with self.assertRaises(InvalidOperationError):
@@ -168,6 +172,12 @@ class TestTransactionProcessorBasics(ProcessorTestCase):
         transaction = deposit(account.account_id, 100)
         self.assertFalse(TransactionProcessor(self.bank).process(transaction))
         self.assertEqual(transaction.status, TransactionStatus.FAILED)
+
+    def test_processing_time_comes_from_bank_clock(self):
+        account = open_funded_account(self.bank, self.alice)
+        transaction = deposit(account.account_id, 100)
+        TransactionProcessor(self.bank).process(transaction)
+        self.assertEqual(transaction.processed_at, DAYTIME)
 
     def test_transaction_is_processed_only_once(self):
         account = open_funded_account(self.bank, self.alice)

@@ -17,7 +17,7 @@ from exceptions import (
     SuspiciousOperationBlockedError,
     TransactionNotFoundError,
 )
-from main import ZERO, round_money, to_decimal
+from main import ZERO, default_rate_provider, round_money, to_decimal
 
 
 class TransactionType:
@@ -45,8 +45,9 @@ class TransactionStatus:
 class Transaction:
     """Данные одной денежной операции и её текущее состояние.
 
-    Транзакция не выполняет себя сама: движение денег реализует TransactionProcessor. 
-    Благодаря этому транзакцию можно хранить в очереди, логировать и тестировать без банка и счетов.
+    Транзакция не выполняет себя сама: движение денег реализует
+    TransactionProcessor. Благодаря этому транзакцию можно хранить
+    в очереди, логировать и тестировать без банка и счетов.
     """
 
     def __init__(
@@ -62,7 +63,7 @@ class Transaction:
         self._validate_participants(transaction_type, sender_account_id, receiver_account_id)
         self.transaction_id = transaction_id or uuid.uuid4().hex[:10]
         self.transaction_type = transaction_type
-        self.amount = to_decimal(amount)
+        self.amount = round_money(to_decimal(amount))
         self.fee = ZERO
         self.sender_account_id = sender_account_id
         self.receiver_account_id = receiver_account_id
@@ -89,14 +90,14 @@ class Transaction:
     def mark_processing(self):
         self.status = TransactionStatus.PROCESSING
 
-    def mark_completed(self):
+    def mark_completed(self, at: datetime | None = None):
         self.status = TransactionStatus.COMPLETED
-        self.processed_at = datetime.now()
+        self.processed_at = at or datetime.now()
 
-    def mark_failed(self, reason: str):
+    def mark_failed(self, reason: str, at: datetime | None = None):
         self.status = TransactionStatus.FAILED
         self.failure_reason = reason
-        self.processed_at = datetime.now()
+        self.processed_at = at or datetime.now()
 
     def mark_cancelled(self):
         self.status = TransactionStatus.CANCELLED
@@ -187,32 +188,6 @@ class TransactionQueue:
         )
 
 
-RATES_TO_RUB = {
-    "RUB": Decimal("1"),
-    "USD": Decimal("95"),
-    "EUR": Decimal("103"),
-    "KZT": Decimal("0.19"),
-    "CNY": Decimal("13.1"),
-}
-
-
-def default_rate_provider(from_currency: str, to_currency: str) -> Decimal:
-    """Курс конвертации через рубль как базовую валюту.
-
-    Имитирует обращение к внешнему сервису курсов. Отсутствие валюты
-    в справочнике — постоянная ошибка, поэтому выбрасывается
-    InvalidOperationError, а не CurrencyConversionError.
-    """
-    if from_currency == to_currency:
-        return Decimal("1")
-    try:
-        return RATES_TO_RUB[from_currency] / RATES_TO_RUB[to_currency]
-    except KeyError:
-        raise InvalidOperationError(
-            f"Нет курса конвертации {from_currency} -> {to_currency}."
-        ) from None
-
-
 class TransactionProcessor:
     """Исполнитель транзакций.
 
@@ -270,11 +245,12 @@ class TransactionProcessor:
             except CurrencyConversionError as error:
                 self._log_error(transaction, error, attempt)
                 continue
-            transaction.mark_completed()
+            transaction.mark_completed(at=self.bank.now())
             return True
 
         transaction.mark_failed(
-            f"Не удалось получить курс валюты после {self.max_retries} попыток."
+            f"Не удалось получить курс валюты после {self.max_retries} попыток.",
+            at=self.bank.now(),
         )
         return False
 
@@ -316,7 +292,7 @@ class TransactionProcessor:
 
     def _fail(self, transaction: Transaction, error: Exception, attempt: int) -> bool:
         self._log_error(transaction, error, attempt)
-        transaction.mark_failed(str(error))
+        transaction.mark_failed(str(error), at=self.bank.now())
         return False
 
     def _log_error(self, transaction: Transaction, error: Exception, attempt: int):
@@ -325,5 +301,5 @@ class TransactionProcessor:
             "error": str(error),
             "error_type": type(error).__name__,
             "attempt": attempt,
-            "timestamp": datetime.now(),
+            "timestamp": self.bank.now(),
         })

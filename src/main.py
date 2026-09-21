@@ -1,4 +1,4 @@
-""" Банковские счета и работа с денежными суммами """
+"""Денежные суммы, курсы валют и банковские счета."""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -19,8 +19,10 @@ ZERO = Decimal("0.00")
 def to_decimal(value) -> Decimal:
     """Преобразует число в Decimal.
 
-    float переводится через str(), чтобы получить ожидаемое десятичное значение, а не точную копию двоичной погрешности:
-    Decimal(0.1) равен 0.1000000000000000055..., а Decimal("0.1") — ровно 0.1. bool отклоняется явно, так как в Python это подкласс int.
+    float переводится через str(), чтобы получить ожидаемое десятичное
+    значение, а не точную копию двоичной погрешности: Decimal(0.1)
+    равен 0.1000000000000000055..., а Decimal("0.1") — ровно 0.1.
+    bool отклоняется явно, так как в Python это подкласс int.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         raise InvalidOperationError(f"Ожидалось число, получено: {value!r}.")
@@ -36,6 +38,32 @@ def to_decimal(value) -> Decimal:
 def round_money(value: Decimal) -> Decimal:
     """Округляет сумму до копеек; половина округляется от нуля."""
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+RATES_TO_RUB = {
+    "RUB": Decimal("1"),
+    "USD": Decimal("95"),
+    "EUR": Decimal("103"),
+    "KZT": Decimal("0.19"),
+    "CNY": Decimal("13.1"),
+}
+
+
+def default_rate_provider(from_currency: str, to_currency: str) -> Decimal:
+    """Курс конвертации через рубль как базовую валюту.
+
+    Имитирует обращение к внешнему сервису курсов. Отсутствие валюты
+    в справочнике — постоянная ошибка, поэтому выбрасывается
+    InvalidOperationError, а не CurrencyConversionError.
+    """
+    if from_currency == to_currency:
+        return Decimal("1")
+    try:
+        return RATES_TO_RUB[from_currency] / RATES_TO_RUB[to_currency]
+    except KeyError:
+        raise InvalidOperationError(
+            f"Нет курса конвертации {from_currency} -> {to_currency}."
+        ) from None
 
 
 class AccountStatus:
@@ -95,7 +123,7 @@ class BankAccount(AbstractAccount):
 
     ACCOUNT_TYPE = "BankAccount"
     ALLOWED_CURRENCIES = frozenset({"RUB", "USD", "EUR", "KZT", "CNY"})
-    DEFAULT_TRANSACTION_LIMIT = Decimal("100000")
+    DEFAULT_TRANSACTION_LIMIT = Decimal("100000.00")
 
     def __init__(
         self,
@@ -113,7 +141,7 @@ class BankAccount(AbstractAccount):
         if max_transaction_limit is None:
             limit = self.DEFAULT_TRANSACTION_LIMIT
         else:
-            limit = to_decimal(max_transaction_limit)
+            limit = round_money(to_decimal(max_transaction_limit))
         if limit <= 0:
             raise InvalidOperationError("Лимит на операцию должен быть положительным.")
         self._currency = currency
@@ -211,7 +239,7 @@ class SavingsAccount(BankAccount):
         max_transaction_limit=None,
     ):
         super().__init__(owner, currency, account_id, max_transaction_limit)
-        self.min_balance = to_decimal(min_balance)
+        self.min_balance = round_money(to_decimal(min_balance))
         self.monthly_rate = to_decimal(monthly_rate)
         if self.min_balance < 0:
             raise InvalidOperationError("Минимальный остаток не может быть отрицательным.")
@@ -254,7 +282,7 @@ class PremiumAccount(BankAccount):
     """Премиальный счёт: повышенный лимит, овердрафт и комиссия за снятие."""
 
     ACCOUNT_TYPE = "PremiumAccount"
-    DEFAULT_TRANSACTION_LIMIT = Decimal("1000000")
+    DEFAULT_TRANSACTION_LIMIT = Decimal("1000000.00")
 
     def __init__(
         self,
@@ -266,8 +294,8 @@ class PremiumAccount(BankAccount):
         max_transaction_limit=None,
     ):
         super().__init__(owner, currency, account_id, max_transaction_limit)
-        self.overdraft_limit = to_decimal(overdraft_limit)
-        self.withdrawal_fee = to_decimal(withdrawal_fee)
+        self.overdraft_limit = round_money(to_decimal(overdraft_limit))
+        self.withdrawal_fee = round_money(to_decimal(withdrawal_fee))
         if self.overdraft_limit < 0 or self.withdrawal_fee < 0:
             raise InvalidOperationError("Овердрафт и комиссия не могут быть отрицательными.")
 

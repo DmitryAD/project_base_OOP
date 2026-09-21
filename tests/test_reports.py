@@ -93,6 +93,10 @@ class TestReportBuilderReportTypes(ReportTestCase):
         self.assertEqual(report["report_type"], ReportType.RISK)
         self.assertEqual(report["summary"]["total_events"], len(report["rows"]))
 
+    def test_generated_at_uses_bank_clock(self):
+        report = self.builder.build_bank_report()
+        self.assertEqual(report["generated_at"], DAYTIME.isoformat(timespec="seconds"))
+
     def test_report_without_transactions(self):
         report = ReportBuilder(self.bank).build_client_report(self.alice.client_id)
         self.assertEqual(report["rows"], [])
@@ -111,7 +115,7 @@ class TestReportBuilderExports(ReportTestCase):
         path = self.builder.export_to_json(report, self.output / "nested" / "client.json")
         loaded = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(loaded["report_type"], ReportType.CLIENT)
-        self.assertEqual(loaded["rows"][0]["amount"], "500")
+        self.assertEqual(loaded["rows"][0]["amount"], "500.00")
 
     def test_export_to_csv(self):
         report = self.builder.build_bank_report()

@@ -1,8 +1,7 @@
-"""Отчёты по клиенту, банку и рискам: текст, JSON, CSV и графики. """
+"""Отчёты по клиенту, банку и рискам: текст, JSON, CSV и графики."""
 
 import csv
 import json
-from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -111,11 +110,10 @@ class ReportBuilder:
             "by_severity": by_severity,
         }, rows)
 
-    @staticmethod
-    def _make_report(report_type: str, summary: dict, rows: list[dict]) -> dict:
+    def _make_report(self, report_type: str, summary: dict, rows: list[dict]) -> dict:
         return {
             "report_type": report_type,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "generated_at": self.bank.now().isoformat(timespec="seconds"),
             "summary": summary,
             "rows": rows,
         }
@@ -192,7 +190,7 @@ class ReportBuilder:
             currency = report["summary"]["ranking_currency"]
             saved.append(self._save_bar_chart(
                 {row["full_name"]: row["balance"] for row in top_rows},
-                f"Баланс клиентов ({currency})", "Клиент", "Баланс",
+                f"Баланс клиентов в пересчёте на {currency}", "Клиент", "Баланс",
                 directory / "bank_clients_balance_bar.png",
             ))
         return saved

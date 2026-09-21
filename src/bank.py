@@ -21,6 +21,8 @@ from main import (
     InvestmentAccount,
     PremiumAccount,
     SavingsAccount,
+    default_rate_provider,
+    round_money,
     to_decimal,
 )
 from risk import RiskAnalyzer, RiskLevel
@@ -42,8 +44,11 @@ RISK_SEVERITY = {
 class Bank:
     """Центральный объект системы.
 
-    Хранит клиентов и счета, выполняет операции через единые проверки (ночной запрет, принадлежность счёта, оценка риска) и записывает значимые события в журнал аудита.
-    Источник времени, журнал и анализатор рисков передаются в конструктор, что позволяет подменять их в тестах.
+    Хранит клиентов и счета, выполняет операции через единые проверки
+    (ночной запрет, принадлежность счёта, оценка риска) и записывает
+    значимые события в журнал аудита. Источник времени, сервис курсов,
+    журнал и анализатор рисков передаются в конструктор, что позволяет
+    подменять их в тестах.
     """
 
     NIGHT_START = time(0, 0)
@@ -56,9 +61,11 @@ class Bank:
         time_provider=datetime.now,
         audit_log: AuditLog | None = None,
         risk_analyzer: RiskAnalyzer | None = None,
+        rate_provider=default_rate_provider,
     ):
         self.name = name
         self._time_provider = time_provider
+        self._rate_provider = rate_provider
         self.audit_log = audit_log if audit_log is not None else AuditLog(time_provider=time_provider)
         self.risk_analyzer = (
             risk_analyzer if risk_analyzer is not None else RiskAnalyzer(time_provider=time_provider)
@@ -70,6 +77,10 @@ class Bank:
         self._login_attempts: dict[str, int] = {}
         self._operation_history: dict[str, list[datetime]] = {}
         self._known_receivers: dict[str, set[str]] = {}
+
+    def now(self) -> datetime:
+        """Текущее время по часам банка."""
+        return self._time_provider()
 
     def add_client(self, client: Client) -> Client:
         if client.client_id in self.clients:
@@ -153,7 +164,7 @@ class Bank:
         )
 
     def is_night(self) -> bool:
-        return self.NIGHT_START <= self._time_provider().time() < self.NIGHT_END
+        return self.NIGHT_START <= self.now().time() < self.NIGHT_END
 
     def check_night_restriction(self):
         if self.is_night():
@@ -169,13 +180,16 @@ class Bank:
     ) -> str:
         """Оценивает риск операции клиента и фиксирует результат в журнале.
 
-        Единая точка риск-контроля для прямых операций банка и для TransactionProcessor. 
-        Возвращает уровень риска для разрешённой операции и выбрасывает SuspiciousOperationBlockedError для высокорискованной.
-        Время операции добавляется в историю после анализа, чтобы операция не учитывалась в собственной частоте.
-        Получатель считается известным только после успешной проверки, поэтому заблокированная попытка не делает новый счёт доверенным.
+        Единая точка риск-контроля для прямых операций банка и для
+        TransactionProcessor. Возвращает уровень риска для разрешённой
+        операции и выбрасывает SuspiciousOperationBlockedError для
+        высокорискованной. Время операции добавляется в историю после
+        анализа, чтобы операция не учитывалась в собственной частоте.
+        Получатель считается известным только после успешной проверки,
+        поэтому заблокированная попытка не делает новый счёт доверенным.
         """
         amount = to_decimal(amount)
-        now = self._time_provider()
+        now = self.now()
         history = self._operation_history.setdefault(client_id, [])
         known_receivers = self._known_receivers.setdefault(client_id, set())
         is_new_receiver = receiver_account_id is not None and receiver_account_id not in known_receivers
@@ -276,19 +290,20 @@ class Bank:
             totals[account.currency] = totals.get(account.currency, ZERO) + account.balance
         return totals
 
+    def get_client_total_balance(self, client_id: str, currency: str = "RUB") -> Decimal:
+        """Суммарный баланс всех счетов клиента в пересчёте на указанную валюту."""
+        total = ZERO
+        for account in self.get_client_accounts(client_id):
+            rate = to_decimal(self._rate_provider(account.currency, currency))
+            total += round_money(account.balance * rate)
+        return total
+
     def get_clients_ranking(self, currency: str = "RUB") -> list[tuple[Client, Decimal]]:
-        """Клиенты, отсортированные по убыванию суммарного баланса в указанной валюте."""
-        ranking = []
-        for client in self.clients.values():
-            total = sum(
-                (
-                    self.accounts[account_id].balance
-                    for account_id in client.account_ids
-                    if self.accounts[account_id].currency == currency
-                ),
-                ZERO,
-            )
-            ranking.append((client, total))
+        """Клиенты по убыванию суммарного баланса в пересчёте на указанную валюту."""
+        ranking = [
+            (client, self.get_client_total_balance(client.client_id, currency))
+            for client in self.clients.values()
+        ]
         ranking.sort(key=lambda pair: pair[1], reverse=True)
         return ranking
 

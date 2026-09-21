@@ -1,4 +1,3 @@
-
 import os
 import sys
 import unittest
@@ -124,10 +123,27 @@ class TestBankOperations(unittest.TestCase):
         rich = make_client(bank, "Богатый")
         open_funded_account(bank, poor, 100)
         open_funded_account(bank, rich, 5000)
-        open_funded_account(bank, rich, 900, currency="USD")
         ranking = bank.get_clients_ranking("RUB")
         self.assertEqual([client for client, _ in ranking], [rich, poor])
         self.assertEqual(ranking[0][1], 5000)
+
+    def test_ranking_converts_all_accounts_to_one_currency(self):
+        bank = make_bank()
+        rub_client = make_client(bank, "Рублёвый")
+        usd_client = make_client(bank, "Долларовый")
+        open_funded_account(bank, rub_client, 50_000)
+        open_funded_account(bank, usd_client, 1_000, currency="USD")
+        open_funded_account(bank, usd_client, 100, currency="EUR")
+        ranking = bank.get_clients_ranking("RUB")
+        self.assertEqual(ranking[0], (usd_client, 105_300))
+        self.assertEqual(ranking[1], (rub_client, 50_000))
+
+    def test_client_total_balance_in_other_currency(self):
+        bank = make_bank()
+        client = make_client(bank)
+        open_funded_account(bank, client, 9_500)
+        open_funded_account(bank, client, 100, currency="USD")
+        self.assertEqual(bank.get_client_total_balance(client.client_id, "USD"), 200)
 
 
 class TestBankAuthentication(unittest.TestCase):

@@ -82,7 +82,7 @@ def demo_bank(bank: Bank) -> dict:
         print(f"Вход с неверным паролем: {error}")
     print(f"Вход с верным паролем: {bank.authenticate_client(alice.client_id, 'qwerty')}")
 
-    print("Рейтинг клиентов (RUB):")
+    print("Рейтинг клиентов (все счета в пересчёте на RUB):")
     for client, total in bank.get_clients_ranking():
         print(f"  {client.full_name}: {total}")
 
@@ -160,7 +160,7 @@ def demo_simulation() -> BankSimulation:
         print(f"  {transaction}")
     print(f"Риск-профиль: {simulation.get_client_risk_profile(client.client_id)}")
 
-    print("\nТоп-3 клиентов по балансу (RUB):")
+    print("\nТоп-3 клиентов по балансу (все счета в пересчёте на RUB):")
     for top_client, total in simulation.get_top_clients(3):
         print(f"  {top_client.full_name}: {total}")
     print(f"Статистика транзакций: {simulation.get_transaction_statistics()}")
