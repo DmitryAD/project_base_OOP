@@ -1,4 +1,9 @@
-"""Отчёты по клиенту, банку и рискам: текст, JSON, CSV и графики."""
+"""Отчёты по клиенту, банку и рискам: текст, JSON, CSV и графики.
+
+Для matplotlib выбран бэкенд Agg: он рисует сразу в файл и не требует
+графического дисплея, которого нет на серверах и в облачных средах
+разработки вроде GitHub Codespaces.
+"""
 
 import csv
 import json
@@ -48,7 +53,10 @@ class ReportBuilder:
                 "transaction_id": t.transaction_id,
                 "type": t.transaction_type,
                 "amount": t.amount,
+                "currency": t.currency,
                 "fee": t.fee,
+                "debited_amount": t.debited_amount,
+                "credited_amount": t.credited_amount,
                 "sender_account_id": t.sender_account_id,
                 "receiver_account_id": t.receiver_account_id,
                 "status": t.status,
@@ -237,10 +245,10 @@ class ReportBuilder:
     def build_balance_movement(self, account_id: str) -> list[float]:
         """Накопленное изменение баланса счёта по успешным транзакциям.
 
-        Отсчёт идёт от нуля, поэтому ряд показывает тренд, а не
-        абсолютный баланс: начальные пополнения в обход обработчика
-        транзакций в него не входят. Зачисление при переводе между
-        валютами учитывается в валюте отправителя.
+        Берутся суммы, фактически списанные и зачисленные обработчиком,
+        поэтому ряд учитывает конвертацию валют и комиссии счёта и
+        выражен в валюте самого счёта. Отсчёт идёт от нуля, то есть ряд
+        показывает изменение баланса, а не его абсолютное значение.
         """
         movement = 0.0
         timeline = []
@@ -248,11 +256,11 @@ class ReportBuilder:
             if transaction.status != TransactionStatus.COMPLETED:
                 continue
             changed = False
-            if transaction.receiver_account_id == account_id:
-                movement += float(transaction.amount)
+            if transaction.receiver_account_id == account_id and transaction.credited_amount:
+                movement += float(transaction.credited_amount)
                 changed = True
-            if transaction.sender_account_id == account_id:
-                movement -= float(transaction.amount + transaction.fee)
+            if transaction.sender_account_id == account_id and transaction.debited_amount:
+                movement -= float(transaction.debited_amount)
                 changed = True
             if changed:
                 timeline.append(movement)

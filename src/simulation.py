@@ -138,18 +138,18 @@ class BankSimulation:
         if transaction_type == TransactionType.DEPOSIT:
             receiver = self._rng.choice(self.accounts)
             return Transaction(
-                transaction_type, amount,
+                transaction_type, amount, receiver.currency,
                 receiver_account_id=receiver.account_id, priority=priority,
             )
         if transaction_type == TransactionType.WITHDRAWAL:
             sender = self._rng.choice(self.accounts)
             return Transaction(
-                transaction_type, amount,
+                transaction_type, amount, sender.currency,
                 sender_account_id=sender.account_id, priority=priority,
             )
         sender, receiver = self._rng.sample(self.accounts, 2)
         return Transaction(
-            transaction_type, amount,
+            transaction_type, amount, sender.currency,
             sender_account_id=sender.account_id,
             receiver_account_id=receiver.account_id,
             priority=priority,

@@ -130,6 +130,8 @@ class Bank:
             )
 
         account = account_cls(owner=client.full_name, currency=currency, **account_options)
+        if account.account_id in self.accounts:
+            raise InvalidOperationError(f"Счёт с ID {account.account_id} уже существует.")
         self.accounts[account.account_id] = account
         self._account_owners[account.account_id] = client_id
         client.account_ids.append(account.account_id)
@@ -226,7 +228,9 @@ class Bank:
 
     def deposit_to_account(self, account_id: str, amount) -> Decimal:
         self.check_night_restriction()
-        return self.get_account(account_id).deposit(amount)
+        account = self.get_account(account_id)
+        self.check_operation_risk(self.get_client_id_for_account(account_id), amount)
+        return account.deposit(amount)
 
     def withdraw_from_account(self, account_id: str, client_id: str, amount) -> Decimal:
         self.check_night_restriction()

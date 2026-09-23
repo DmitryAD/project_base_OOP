@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -43,8 +44,15 @@ def open_funded_account(bank, client, amount=0, **account_options):
     return account
 
 
-def deposit(receiver="a", amount=100, **kwargs):
-    return Transaction(TransactionType.DEPOSIT, amount, receiver_account_id=receiver, **kwargs)
+def usd_to_rub(from_currency, to_currency):
+    """Фиксированный курс для тестов, не зависящий от справочника в main.py."""
+    return Decimal("95")
+
+
+def deposit(receiver="a", amount=100, currency="RUB", **kwargs):
+    return Transaction(
+        TransactionType.DEPOSIT, amount, currency, receiver_account_id=receiver, **kwargs
+    )
 
 
 class TestTransaction(unittest.TestCase):
@@ -61,13 +69,23 @@ class TestTransaction(unittest.TestCase):
         with self.assertRaises(InvalidOperationError):
             Transaction(TransactionType.INTERNAL_TRANSFER, 100, sender_account_id="a")
 
+    def test_unknown_currency(self):
+        with self.assertRaises(InvalidOperationError):
+            Transaction(TransactionType.DEPOSIT, 100, "XXX", receiver_account_id="a")
+
+    def test_currency_is_stored(self):
+        self.assertEqual(deposit(currency="USD").currency, "USD")
+
     def test_amount_is_rounded_to_cents(self):
         self.assertEqual(str(deposit(amount=1778).amount), "1778.00")
         self.assertEqual(str(deposit(amount=10.005).amount), "10.01")
 
     def test_transfer_to_same_account(self):
         with self.assertRaises(InvalidOperationError):
-            Transaction(TransactionType.INTERNAL_TRANSFER, 100, sender_account_id="a", receiver_account_id="a")
+            Transaction(
+                TransactionType.INTERNAL_TRANSFER, 100,
+                sender_account_id="a", receiver_account_id="a",
+            )
 
 
 class TestTransactionQueue(unittest.TestCase):
@@ -138,7 +156,7 @@ class ProcessorTestCase(unittest.TestCase):
 
     def transfer(self, sender, receiver, amount, transaction_type=TransactionType.INTERNAL_TRANSFER):
         return Transaction(
-            transaction_type, amount,
+            transaction_type, amount, sender.currency,
             sender_account_id=sender.account_id,
             receiver_account_id=receiver.account_id,
         )
@@ -155,7 +173,9 @@ class TestTransactionProcessorBasics(ProcessorTestCase):
 
     def test_withdrawal_with_insufficient_funds_fails(self):
         account = open_funded_account(self.bank, self.alice)
-        transaction = Transaction(TransactionType.WITHDRAWAL, 500, sender_account_id=account.account_id)
+        transaction = Transaction(
+            TransactionType.WITHDRAWAL, 500, sender_account_id=account.account_id,
+        )
         self.assertFalse(TransactionProcessor(self.bank).process(transaction))
         self.assertEqual(transaction.status, TransactionStatus.FAILED)
         self.assertIn("Недостаточно средств", transaction.failure_reason)
@@ -186,6 +206,36 @@ class TestTransactionProcessorBasics(ProcessorTestCase):
         self.assertTrue(processor.process(transaction))
         self.assertFalse(processor.process(transaction))
         self.assertEqual(account.balance, 100)
+
+    def test_currency_must_match_sender_account(self):
+        sender = open_funded_account(self.bank, self.alice, 1000, currency="USD")
+        receiver = open_funded_account(self.bank, self.bob, currency="USD")
+        transaction = Transaction(
+            TransactionType.INTERNAL_TRANSFER, 100, "RUB",
+            sender_account_id=sender.account_id,
+            receiver_account_id=receiver.account_id,
+        )
+        processor = TransactionProcessor(self.bank)
+        self.assertFalse(processor.process(transaction))
+        self.assertEqual(sender.balance, 1000)
+
+    def test_actual_amounts_are_recorded(self):
+        sender = open_funded_account(self.bank, self.alice, 1000, currency="USD")
+        receiver = open_funded_account(self.bank, self.bob, currency="RUB")
+        transaction = self.transfer(sender, receiver, 100, TransactionType.EXTERNAL_TRANSFER)
+        TransactionProcessor(self.bank, rate_provider=usd_to_rub).process(transaction)
+        self.assertEqual(transaction.debited_amount, 101)
+        self.assertEqual(transaction.credited_amount, 9500)
+
+    def test_premium_fee_is_included_in_debited_amount(self):
+        sender = open_funded_account(
+            self.bank, self.alice, 1000, account_type="premium", withdrawal_fee=25,
+        )
+        receiver = open_funded_account(self.bank, self.bob)
+        transaction = self.transfer(sender, receiver, 100)
+        TransactionProcessor(self.bank).process(transaction)
+        self.assertEqual(transaction.debited_amount, 125)
+        self.assertEqual(transaction.credited_amount, 100)
 
     def test_internal_transfer(self):
         sender = open_funded_account(self.bank, self.alice, 1000)
@@ -221,7 +271,8 @@ class TestTransactionProcessorBasics(ProcessorTestCase):
     def test_currency_conversion(self):
         sender = open_funded_account(self.bank, self.alice, 1000, currency="USD")
         receiver = open_funded_account(self.bank, self.bob, currency="RUB")
-        TransactionProcessor(self.bank).process(self.transfer(sender, receiver, 100))
+        processor = TransactionProcessor(self.bank, rate_provider=usd_to_rub)
+        processor.process(self.transfer(sender, receiver, 100))
         self.assertEqual(sender.balance, 900)
         self.assertEqual(receiver.balance, 9500)
 
@@ -253,7 +304,7 @@ class TestTransactionProcessorSafety(ProcessorTestCase):
     def test_sender_is_not_debited_when_credit_exceeds_receiver_limit(self):
         sender = open_funded_account(self.bank, self.alice, 2000, currency="USD")
         receiver = open_funded_account(self.bank, self.bob, currency="RUB")
-        processor = TransactionProcessor(self.bank)
+        processor = TransactionProcessor(self.bank, rate_provider=usd_to_rub)
         self.assertFalse(processor.process(self.transfer(sender, receiver, 1500)))
         self.assertEqual(sender.balance, 2000)
         self.assertEqual(receiver.balance, 0)
@@ -310,7 +361,7 @@ class TestTransactionBatch(ProcessorTestCase):
         queue = TransactionQueue()
         for i in range(10):
             queue.add(Transaction(
-                TransactionType.INTERNAL_TRANSFER, 100 + i,
+                TransactionType.INTERNAL_TRANSFER, 100 + i, sender.currency,
                 sender_account_id=sender.account_id,
                 receiver_account_id=receiver.account_id,
                 priority=i,

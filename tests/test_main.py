@@ -247,14 +247,29 @@ class TestInvestmentAccount(unittest.TestCase):
         with self.assertRaises(InsufficientFundsError):
             account.withdraw(500)
 
-    def test_project_yearly_growth(self):
+    def test_project_yearly_growth_returns_gain_by_default_rates(self):
         account = InvestmentAccount(owner="Мария")
         account.deposit(1000)
         account.buy_asset("stocks", 1000)
         growth = account.project_yearly_growth()
-        self.assertEqual(growth["stocks"], Decimal("1100.00"))
+        self.assertEqual(growth["stocks"], Decimal("100.00"))
         self.assertEqual(growth["bonds"], 0)
         self.assertEqual(growth["etf"], 0)
+        self.assertEqual(growth["total"], Decimal("100.00"))
+
+    def test_project_yearly_growth_accepts_custom_rates(self):
+        account = InvestmentAccount(owner="Мария")
+        account.deposit(10_000)
+        account.buy_asset("stocks", 5000)
+        account.buy_asset("bonds", 2000)
+        growth = account.project_yearly_growth({"stocks": 0.2})
+        self.assertEqual(growth["stocks"], Decimal("1000.00"))
+        self.assertEqual(growth["bonds"], 0)
+        self.assertEqual(growth["total"], Decimal("1000.00"))
+
+    def test_project_yearly_growth_rejects_unknown_asset(self):
+        with self.assertRaises(InvalidOperationError):
+            InvestmentAccount(owner="Мария").project_yearly_growth({"crypto": 0.5})
 
 
 if __name__ == "__main__":

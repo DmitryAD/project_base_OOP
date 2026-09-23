@@ -17,7 +17,7 @@ from exceptions import (
     SuspiciousOperationBlockedError,
     TransactionNotFoundError,
 )
-from main import ZERO, default_rate_provider, round_money, to_decimal
+from main import ZERO, BankAccount, default_rate_provider, round_money, to_decimal
 
 
 class TransactionType:
@@ -48,12 +48,19 @@ class Transaction:
     Транзакция не выполняет себя сама: движение денег реализует
     TransactionProcessor. Благодаря этому транзакцию можно хранить
     в очереди, логировать и тестировать без банка и счетов.
+
+    amount и fee выражены в валюте currency — валюте списания, то есть
+    валюте счёта отправителя (для пополнения — счёта получателя).
+    После исполнения debited_amount и credited_amount хранят суммы,
+    фактически списанные и зачисленные, вместе с комиссиями счёта и
+    с учётом конвертации.
     """
 
     def __init__(
         self,
         transaction_type: str,
         amount,
+        currency: str = "RUB",
         sender_account_id: str | None = None,
         receiver_account_id: str | None = None,
         priority: int = 0,
@@ -61,12 +68,20 @@ class Transaction:
         transaction_id: str | None = None,
     ):
         self._validate_participants(transaction_type, sender_account_id, receiver_account_id)
+        if currency not in BankAccount.ALLOWED_CURRENCIES:
+            allowed = ", ".join(sorted(BankAccount.ALLOWED_CURRENCIES))
+            raise InvalidOperationError(
+                f"Неподдерживаемая валюта транзакции: {currency}. Допустимые: {allowed}."
+            )
         self.transaction_id = transaction_id or uuid.uuid4().hex[:10]
         self.transaction_type = transaction_type
         self.amount = round_money(to_decimal(amount))
+        self.currency = currency
         self.fee = ZERO
         self.sender_account_id = sender_account_id
         self.receiver_account_id = receiver_account_id
+        self.debited_amount: Decimal | None = None
+        self.credited_amount: Decimal | None = None
         self.status = TransactionStatus.PENDING
         self.failure_reason: str | None = None
         self.priority = priority
@@ -105,7 +120,7 @@ class Transaction:
     def __str__(self) -> str:
         return (
             f"Transaction {self.transaction_id} | {self.transaction_type} | "
-            f"{self.amount:.2f} (комиссия: {self.fee:.2f}) | "
+            f"{self.amount:.2f} {self.currency} (комиссия: {self.fee:.2f}) | "
             f"{self.sender_account_id} -> {self.receiver_account_id} | "
             f"Статус: {self.status}"
         )
@@ -264,31 +279,67 @@ class TransactionProcessor:
         self.bank.check_night_restriction()
         if transaction.receiver_account_id is not None:
             self.bank.get_account(transaction.receiver_account_id)
+
         if transaction.transaction_type == TransactionType.DEPOSIT:
+            self._check_currency(transaction, transaction.receiver_account_id)
+            self.bank.check_operation_risk(
+                client_id=self.bank.get_client_id_for_account(transaction.receiver_account_id),
+                amount=transaction.amount,
+            )
             return
+
         self.bank.get_account(transaction.sender_account_id)
+        self._check_currency(transaction, transaction.sender_account_id)
         self.bank.check_operation_risk(
             client_id=self.bank.get_client_id_for_account(transaction.sender_account_id),
             amount=transaction.amount,
             receiver_account_id=transaction.receiver_account_id,
         )
 
+    def _check_currency(self, transaction: Transaction, account_id: str):
+        """Валюта транзакции должна совпадать с валютой счёта списания."""
+        account = self.bank.get_account(account_id)
+        if transaction.currency != account.currency:
+            raise InvalidOperationError(
+                f"Валюта транзакции {transaction.currency} не совпадает "
+                f"с валютой счёта {account.currency}."
+            )
+
     def _execute(self, transaction: Transaction):
+        """Исполняет операцию и запоминает фактически перемещённые суммы.
+
+        Списанное и зачисленное измеряются по изменению баланса, поэтому
+        учитывают и комиссию самого счёта (например, PremiumAccount), и
+        конвертацию валют.
+        """
         if transaction.transaction_type == TransactionType.DEPOSIT:
-            self.bank.get_account(transaction.receiver_account_id).deposit(transaction.amount)
+            receiver = self.bank.get_account(transaction.receiver_account_id)
+            transaction.credited_amount = self._deposit(receiver, transaction.amount)
             return
 
         sender = self.bank.get_account(transaction.sender_account_id)
         if transaction.transaction_type == TransactionType.WITHDRAWAL:
-            sender.withdraw(transaction.amount)
+            transaction.debited_amount = self._withdraw(sender, transaction.amount)
             return
 
         receiver = self.bank.get_account(transaction.receiver_account_id)
         rate = to_decimal(self._rate_provider(sender.currency, receiver.currency))
         credited = round_money(transaction.amount * rate)
         receiver.validate_deposit(credited)
-        sender.withdraw(transaction.amount + transaction.fee)
-        receiver.deposit(credited)
+        transaction.debited_amount = self._withdraw(sender, transaction.amount + transaction.fee)
+        transaction.credited_amount = self._deposit(receiver, credited)
+
+    @staticmethod
+    def _withdraw(account: BankAccount, amount: Decimal) -> Decimal:
+        balance_before = account.balance
+        account.withdraw(amount)
+        return balance_before - account.balance
+
+    @staticmethod
+    def _deposit(account: BankAccount, amount: Decimal) -> Decimal:
+        balance_before = account.balance
+        account.deposit(amount)
+        return account.balance - balance_before
 
     def _fail(self, transaction: Transaction, error: Exception, attempt: int) -> bool:
         self._log_error(transaction, error, attempt)

@@ -115,9 +115,10 @@ class TestBankRiskIntegration(unittest.TestCase):
     def setUp(self):
         self.bank = make_bank()
         self.client = make_client(self.bank)
-        self.account = open_funded_account(
-            self.bank, self.client, 1_000_000, max_transaction_limit=2_000_000,
+        self.account = self.bank.open_account(
+            self.client.client_id, max_transaction_limit=2_000_000,
         )
+        self.account.deposit(1_000_000)
 
     def withdraw(self, amount):
         return self.bank.withdraw_from_account(self.account.account_id, self.client.client_id, amount)
@@ -152,6 +153,24 @@ class TestBankRiskIntegration(unittest.TestCase):
         self.assertEqual(profile[RiskLevel.LOW], 1)
         self.assertEqual(profile[RiskLevel.MEDIUM], 1)
         self.assertEqual(profile[RiskLevel.HIGH], 0)
+
+    def test_large_deposit_is_analysed(self):
+        bank = make_bank()
+        client = make_client(bank, "Вкладчик")
+        account = bank.open_account(client.client_id, max_transaction_limit=2_000_000)
+        bank.deposit_to_account(account.account_id, 600_000)
+        profile = bank.get_client_risk_profile(client.client_id)
+        self.assertEqual(profile[RiskLevel.MEDIUM], 1)
+
+    def test_high_risk_deposit_is_blocked(self):
+        bank = make_bank()
+        client = make_client(bank, "Вкладчик")
+        account = bank.open_account(client.client_id, max_transaction_limit=2_000_000)
+        for _ in range(RiskAnalyzer.FREQUENT_OPERATIONS_THRESHOLD):
+            bank.deposit_to_account(account.account_id, 100)
+        with self.assertRaises(SuspiciousOperationBlockedError):
+            bank.deposit_to_account(account.account_id, 600_000)
+        self.assertEqual(account.balance, 500)
 
     def test_blocked_transfer_does_not_make_receiver_known(self):
         other = make_client(self.bank, "Получатель")

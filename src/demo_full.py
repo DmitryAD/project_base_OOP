@@ -1,4 +1,7 @@
-"""Сквозная демонстрация возможностей PyBank."""
+"""Сквозная демонстрация возможностей PyBank.
+
+Запуск: python src/demo_full.py
+"""
 
 import logging
 from datetime import date, datetime
@@ -53,7 +56,11 @@ def demo_accounts():
     investment.deposit(10000)
     investment.buy_asset("stocks", 4000)
     print(investment)
-    print(f"Прогноз портфеля через год: {format_amounts(investment.project_yearly_growth())}")
+    print(f"Ожидаемый прирост портфеля за год: {format_amounts(investment.project_yearly_growth())}")
+    print(
+        "Прирост при собственных ставках {'stocks': 0.2}: "
+        f"{format_amounts(investment.project_yearly_growth({'stocks': 0.2}))}"
+    )
 
 
 def demo_bank(bank: Bank) -> dict:
@@ -98,12 +105,12 @@ def demo_transactions(bank: Bank, context: dict) -> TransactionProcessor:
 
     queue = TransactionQueue()
     for transaction in (
-        Transaction(TransactionType.DEPOSIT, 1000, receiver_account_id=alice_rub, priority=1),
-        Transaction(TransactionType.WITHDRAWAL, 200, sender_account_id=bob_rub, priority=1),
-        Transaction(TransactionType.INTERNAL_TRANSFER, 2000, sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=5),
-        Transaction(TransactionType.EXTERNAL_TRANSFER, 3000, sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=3),
-        Transaction(TransactionType.INTERNAL_TRANSFER, 300, sender_account_id=alice_usd, receiver_account_id=bob_rub, priority=4),
-        Transaction(TransactionType.DEPOSIT, 500, receiver_account_id=bob_rub, priority=10),
+        Transaction(TransactionType.DEPOSIT, 1000, "RUB", receiver_account_id=alice_rub, priority=1),
+        Transaction(TransactionType.WITHDRAWAL, 200, "RUB", sender_account_id=bob_rub, priority=1),
+        Transaction(TransactionType.INTERNAL_TRANSFER, 2000, "RUB", sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=5),
+        Transaction(TransactionType.EXTERNAL_TRANSFER, 3000, "RUB", sender_account_id=alice_rub, receiver_account_id=bob_rub, priority=3),
+        Transaction(TransactionType.INTERNAL_TRANSFER, 300, "USD", sender_account_id=alice_usd, receiver_account_id=bob_rub, priority=4),
+        Transaction(TransactionType.DEPOSIT, 500, "RUB", receiver_account_id=bob_rub, priority=10),
     ):
         queue.add(transaction)
 

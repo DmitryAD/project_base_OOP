@@ -1,4 +1,9 @@
-"""Денежные суммы, курсы валют и банковские счета."""
+"""Денежные суммы, курсы валют и банковские счета.
+
+Все суммы хранятся как Decimal. Тип float хранит числа в двоичном виде
+и не может точно представить большинство десятичных дробей
+(0.1 + 0.2 != 0.3), что недопустимо для денежных расчётов.
+"""
 
 import uuid
 from abc import ABC, abstractmethod
@@ -377,12 +382,27 @@ class InvestmentAccount(BankAccount):
         self._balance -= value
         return self._balance
 
-    def project_yearly_growth(self) -> dict:
-        """Прогноз стоимости каждого актива через год по ожидаемой доходности."""
-        return {
-            asset: round_money(value * (1 + self.ASSET_YEARLY_RETURN[asset]))
+    def project_yearly_growth(self, growth_rates: dict | None = None) -> dict:
+        """Ожидаемый прирост портфеля за год по каждому активу и в сумме.
+
+        Возвращает именно прирост, а не будущую стоимость: для актива на
+        1000 при ставке 0.1 результат равен 100. Ставки можно задать
+        аргументом growth_rates; без него берутся ASSET_YEARLY_RETURN.
+        Ключ "total" содержит суммарный прирост портфеля.
+        """
+        rates = self.ASSET_YEARLY_RETURN if growth_rates is None else growth_rates
+        unknown = set(rates) - set(self._portfolio)
+        if unknown:
+            raise InvalidOperationError(
+                f"Неизвестные типы активов: {', '.join(sorted(unknown))}."
+            )
+
+        growth = {
+            asset: round_money(value * to_decimal(rates.get(asset, 0)))
             for asset, value in self._portfolio.items()
         }
+        growth["total"] = sum(growth.values(), ZERO)
+        return growth
 
     def get_account_info(self) -> dict:
         info = super().get_account_info()
