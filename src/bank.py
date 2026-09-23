@@ -316,6 +316,15 @@ class Bank:
         suspicious = {AuditSeverity.WARNING, AuditSeverity.CRITICAL}
         return [event for event in self.audit_log.filter() if event.severity in suspicious]
 
+    def get_client_suspicious_operations(self, client_id: str) -> list:
+        """Подозрительные и заблокированные события конкретного клиента."""
+        suspicious = {AuditSeverity.WARNING, AuditSeverity.CRITICAL}
+        return [
+            event
+            for event in self.audit_log.filter(client_id=client_id)
+            if event.severity in suspicious
+        ]
+
     def get_client_risk_profile(self, client_id: str) -> dict:
         """Количество операций клиента на каждом уровне риска."""
         events = self.audit_log.filter(client_id=client_id, category="risk")

@@ -165,6 +165,10 @@ def demo_simulation() -> BankSimulation:
     print(f"История операций ({len(history)}):")
     for transaction in history:
         print(f"  {transaction}")
+    suspicious = simulation.get_client_suspicious_operations(client.client_id)
+    print(f"Подозрительные операции клиента ({len(suspicious)}):")
+    for event in suspicious:
+        print(f"  {event}")
     print(f"Риск-профиль: {simulation.get_client_risk_profile(client.client_id)}")
 
     print("\nТоп-3 клиентов по балансу (все счета в пересчёте на RUB):")

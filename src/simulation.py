@@ -182,6 +182,9 @@ class BankSimulation:
     def get_client_transaction_history(self, client_id: str) -> list[Transaction]:
         return filter_client_transactions(self.transactions, self.bank, client_id)
 
+    def get_client_suspicious_operations(self, client_id: str) -> list:
+        return self.bank.get_client_suspicious_operations(client_id)
+
     def get_client_risk_profile(self, client_id: str) -> dict:
         return self.bank.get_client_risk_profile(client_id)
 

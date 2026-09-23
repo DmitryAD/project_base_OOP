@@ -172,6 +172,18 @@ class TestBankRiskIntegration(unittest.TestCase):
             bank.deposit_to_account(account.account_id, 600_000)
         self.assertEqual(account.balance, 500)
 
+    def test_client_suspicious_operations_are_filtered_by_client(self):
+        other = make_client(self.bank, "Второй")
+        other_account = self.bank.open_account(other.client_id)
+        other_account.deposit(1000)
+        self.withdraw(600_000)
+        self.bank.withdraw_from_account(other_account.account_id, other.client_id, 100)
+
+        events = self.bank.get_client_suspicious_operations(self.client.client_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].client_id, self.client.client_id)
+        self.assertEqual(self.bank.get_client_suspicious_operations(other.client_id), [])
+
     def test_blocked_transfer_does_not_make_receiver_known(self):
         other = make_client(self.bank, "Получатель")
         receiver = open_funded_account(self.bank, other)
