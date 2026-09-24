@@ -99,6 +99,12 @@ class TestBankClientsAndAccounts(unittest.TestCase):
         self.assertEqual(len(self.bank.search_accounts(owner_name="тест")), 2)
         self.assertEqual(len(self.bank.search_accounts(currency="USD")), 1)
         self.assertEqual(len(self.bank.search_accounts(account_type="SavingsAccount")), 1)
+    def test_duplicate_account_id_is_rejected(self):
+        account = self.bank.open_account(self.client.client_id)
+        other = make_client(self.bank, "Другой")
+        with self.assertRaises(InvalidOperationError):
+            self.bank.open_account(other.client_id, account_id=account.account_id)
+        self.assertIs(self.bank.get_account(account.account_id), account)
 
 
 class TestBankOperations(unittest.TestCase):
