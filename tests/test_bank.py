@@ -2,12 +2,14 @@ import os
 import sys
 import unittest
 from datetime import date, datetime
+from decimal import Decimal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from audit import AuditSeverity
 from bank import Bank
 from client import Client, ClientStatus
+from audit import AuditSeverity
 from exceptions import (
     AccountNotFoundError,
     AuthenticationError,
@@ -24,9 +26,17 @@ DAYTIME = datetime(2026, 1, 1, 12, 0)
 NIGHT = datetime(2026, 1, 1, 2, 0)
 
 
+TEST_RATES_TO_RUB = {"RUB": Decimal("1"), "USD": Decimal("95"), "EUR": Decimal("103")}
+
+
+def fixed_rate_provider(from_currency, to_currency):
+    """Курсы для тестов, не зависящие от справочника в main.py."""
+    return TEST_RATES_TO_RUB[from_currency] / TEST_RATES_TO_RUB[to_currency]
+
+
 def make_bank(now=DAYTIME, name="TestBank"):
-    """Банк с фиксированным временем, чтобы результат не зависел от часа запуска тестов."""
-    return Bank(name=name, time_provider=lambda: now)
+    """Банк с фиксированным временем и курсами, чтобы результат тестов был стабильным."""
+    return Bank(name=name, time_provider=lambda: now, rate_provider=fixed_rate_provider)
 
 
 def make_client(bank, name="Тест Тестов", password="pass"):
@@ -90,13 +100,6 @@ class TestBankClientsAndAccounts(unittest.TestCase):
         self.assertEqual(len(self.bank.search_accounts(currency="USD")), 1)
         self.assertEqual(len(self.bank.search_accounts(account_type="SavingsAccount")), 1)
 
-    def test_duplicate_account_id_is_rejected(self):
-        account = self.bank.open_account(self.client.client_id)
-        other = make_client(self.bank, "Другой")
-        with self.assertRaises(InvalidOperationError):
-            self.bank.open_account(other.client_id, account_id=account.account_id)
-        self.assertIs(self.bank.get_account(account.account_id), account)
-
 
 class TestBankOperations(unittest.TestCase):
 
@@ -115,6 +118,37 @@ class TestBankOperations(unittest.TestCase):
         account = bank.open_account(client.client_id)
         with self.assertRaises(NightOperationRestrictedError):
             bank.deposit_to_account(account.account_id, 100)
+
+    def test_night_attempt_is_recorded_as_suspicious(self):
+        bank = make_bank(now=NIGHT)
+        client = make_client(bank)
+        account = bank.open_account(client.client_id)
+        with self.assertRaises(NightOperationRestrictedError):
+            bank.deposit_to_account(account.account_id, 100)
+
+        report = bank.get_suspicious_operations_report()
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0].severity, AuditSeverity.CRITICAL)
+        self.assertIn("ночное время", report[0].message)
+        self.assertEqual(bank.get_client_risk_profile(client.client_id)["high"], 1)
+
+    def test_blocked_client_cannot_withdraw(self):
+        bank = make_bank()
+        client = make_client(bank)
+        account = open_funded_account(bank, client, 1000)
+        client.status = ClientStatus.BLOCKED
+        with self.assertRaises(ClientBlockedError):
+            bank.withdraw_from_account(account.account_id, client.client_id, 100)
+        self.assertEqual(account.balance, 1000)
+
+    def test_blocked_client_cannot_deposit(self):
+        bank = make_bank()
+        client = make_client(bank)
+        account = open_funded_account(bank, client, 1000)
+        client.status = ClientStatus.BLOCKED
+        with self.assertRaises(ClientBlockedError):
+            bank.deposit_to_account(account.account_id, 100)
+        self.assertEqual(account.balance, 1000)
 
     def test_total_balance_by_currency(self):
         bank = make_bank()

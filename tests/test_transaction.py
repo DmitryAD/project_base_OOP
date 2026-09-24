@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from bank import Bank
 from client import Client
+from client import ClientStatus
 from exceptions import (
     CurrencyConversionError,
     InvalidOperationError,
@@ -292,6 +293,35 @@ class TestTransactionProcessorSafety(ProcessorTestCase):
         self.assertFalse(processor.process(transaction))
         self.assertEqual(processor.error_log[0]["error_type"], "NightOperationRestrictedError")
         self.assertEqual(account.balance, 0)
+
+    def test_blocked_client_cannot_transfer(self):
+        sender = open_funded_account(self.bank, self.alice, 1000)
+        receiver = open_funded_account(self.bank, self.bob)
+        self.alice.status = ClientStatus.BLOCKED
+        processor = TransactionProcessor(self.bank)
+        self.assertFalse(processor.process(self.transfer(sender, receiver, 100)))
+        self.assertEqual(processor.error_log[0]["error_type"], "ClientBlockedError")
+        self.assertEqual(sender.balance, 1000)
+
+    def test_failed_transfer_does_not_make_receiver_known(self):
+        sender = open_funded_account(self.bank, self.alice, 100, max_transaction_limit=2_000_000)
+        receiver = open_funded_account(self.bank, self.bob)
+        processor = TransactionProcessor(self.bank)
+
+        self.assertFalse(processor.process(self.transfer(sender, receiver, 1000)))
+        sender.deposit(1_000_000)
+        blocked = self.transfer(sender, receiver, 600_000)
+        self.assertFalse(processor.process(blocked))
+        self.assertIn("высокорискованная", blocked.failure_reason)
+        self.assertEqual(sender.balance, 1_000_100)
+
+    def test_successful_transfer_makes_receiver_known(self):
+        sender = open_funded_account(self.bank, self.alice, 1_000_000, max_transaction_limit=2_000_000)
+        receiver = open_funded_account(self.bank, self.bob, max_transaction_limit=2_000_000)
+        processor = TransactionProcessor(self.bank)
+
+        self.assertTrue(processor.process(self.transfer(sender, receiver, 100)))
+        self.assertTrue(processor.process(self.transfer(sender, receiver, 600_000)))
 
     def test_sender_is_not_debited_when_receiver_is_frozen(self):
         sender = open_funded_account(self.bank, self.alice, 1000)

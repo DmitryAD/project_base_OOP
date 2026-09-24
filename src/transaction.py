@@ -10,6 +10,7 @@ from exceptions import (
     AccountClosedError,
     AccountFrozenError,
     AccountNotFoundError,
+    ClientBlockedError,
     CurrencyConversionError,
     InsufficientFundsError,
     InvalidOperationError,
@@ -221,6 +222,7 @@ class TransactionProcessor:
         AccountFrozenError,
         AccountClosedError,
         AccountNotFoundError,
+        ClientBlockedError,
         InsufficientFundsError,
         InvalidOperationError,
         NightOperationRestrictedError,
@@ -261,6 +263,10 @@ class TransactionProcessor:
                 self._log_error(transaction, error, attempt)
                 continue
             transaction.mark_completed(at=self.bank.now())
+            if transaction.transaction_type in TransactionType.TRANSFERS:
+                self.bank.register_known_receiver(
+                    self._initiator(transaction), transaction.receiver_account_id
+                )
             return True
 
         transaction.mark_failed(
@@ -276,25 +282,31 @@ class TransactionProcessor:
 
     def _run_pre_checks(self, transaction: Transaction):
         """Проверки, выполняемые один раз до попыток исполнения."""
-        self.bank.check_night_restriction()
+        client_id = self._initiator(transaction)
+        self.bank.check_night_restriction(client_id, transaction.amount)
         if transaction.receiver_account_id is not None:
             self.bank.get_account(transaction.receiver_account_id)
 
         if transaction.transaction_type == TransactionType.DEPOSIT:
             self._check_currency(transaction, transaction.receiver_account_id)
-            self.bank.check_operation_risk(
-                client_id=self.bank.get_client_id_for_account(transaction.receiver_account_id),
-                amount=transaction.amount,
-            )
+            self.bank.check_client_is_active(client_id)
+            self.bank.check_operation_risk(client_id=client_id, amount=transaction.amount)
             return
 
         self.bank.get_account(transaction.sender_account_id)
         self._check_currency(transaction, transaction.sender_account_id)
+        self.bank.check_client_is_active(client_id)
         self.bank.check_operation_risk(
-            client_id=self.bank.get_client_id_for_account(transaction.sender_account_id),
+            client_id=client_id,
             amount=transaction.amount,
             receiver_account_id=transaction.receiver_account_id,
         )
+
+    def _initiator(self, transaction: Transaction) -> str | None:
+        """Клиент, от имени которого выполняется операция."""
+        if transaction.transaction_type == TransactionType.DEPOSIT:
+            return self.bank.get_client_id_for_account(transaction.receiver_account_id)
+        return self.bank.get_client_id_for_account(transaction.sender_account_id)
 
     def _check_currency(self, transaction: Transaction, account_id: str):
         """Валюта транзакции должна совпадать с валютой счёта списания."""

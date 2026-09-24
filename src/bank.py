@@ -165,14 +165,39 @@ class Bank:
             client_id=self.get_client_id_for_account(account_id),
         )
 
+    def check_client_is_active(self, client_id: str | None):
+        """Запрещает денежные операции заблокированному клиенту."""
+        if client_id is None:
+            return
+        if self.get_client(client_id).status == ClientStatus.BLOCKED:
+            raise ClientBlockedError(
+                f"Клиент {client_id} заблокирован, денежные операции недоступны."
+            )
+
     def is_night(self) -> bool:
         return self.NIGHT_START <= self.now().time() < self.NIGHT_END
 
-    def check_night_restriction(self):
-        if self.is_night():
-            raise NightOperationRestrictedError(
-                f"Операции недоступны с {self.NIGHT_START:%H:%M} до {self.NIGHT_END:%H:%M}."
-            )
+    def check_night_restriction(self, client_id: str | None = None, amount=None):
+        """Запрещает ночные операции и фиксирует попытку в журнале.
+
+        Запрет срабатывает раньше риск-анализа, поэтому событие пишется
+        здесь: иначе ночная попытка не попала бы ни в аудит, ни в отчёт
+        по подозрительным операциям.
+        """
+        if not self.is_night():
+            return
+
+        reason = "операция в ночное время"
+        self.audit_log.record(
+            AuditSeverity.CRITICAL, "risk", f"Операция заблокирована: {reason}",
+            client_id=client_id,
+            amount=None if amount is None else to_decimal(amount),
+            risk_level=RiskLevel.HIGH,
+            reasons=[reason],
+        )
+        raise NightOperationRestrictedError(
+            f"Операции недоступны с {self.NIGHT_START:%H:%M} до {self.NIGHT_END:%H:%M}."
+        )
 
     def check_operation_risk(
         self,
@@ -187,8 +212,8 @@ class Bank:
         операции и выбрасывает SuspiciousOperationBlockedError для
         высокорискованной. Время операции добавляется в историю после
         анализа, чтобы операция не учитывалась в собственной частоте.
-        Получатель считается известным только после успешной проверки,
-        поэтому заблокированная попытка не делает новый счёт доверенным.
+        Получателя метод доверенным не делает: это происходит только
+        после успешного перевода, через register_known_receiver().
         """
         amount = to_decimal(amount)
         now = self.now()
@@ -221,19 +246,29 @@ class Bank:
             raise SuspiciousOperationBlockedError(
                 f"Операция на сумму {amount} заблокирована как высокорискованная: {reason_text}"
             )
-
-        if receiver_account_id is not None:
-            known_receivers.add(receiver_account_id)
         return level
 
+    def register_known_receiver(self, client_id: str, receiver_account_id: str | None):
+        """Отмечает получателя доверенным после успешного перевода.
+
+        Неудачная операция доверия не даёт: иначе отклонённый перевод
+        снимал бы признак нового получателя со следующей попытки.
+        """
+        if receiver_account_id is None:
+            return
+        self._known_receivers.setdefault(client_id, set()).add(receiver_account_id)
+
     def deposit_to_account(self, account_id: str, amount) -> Decimal:
-        self.check_night_restriction()
         account = self.get_account(account_id)
-        self.check_operation_risk(self.get_client_id_for_account(account_id), amount)
+        client_id = self.get_client_id_for_account(account_id)
+        self.check_night_restriction(client_id, amount)
+        self.check_client_is_active(client_id)
+        self.check_operation_risk(client_id, amount)
         return account.deposit(amount)
 
     def withdraw_from_account(self, account_id: str, client_id: str, amount) -> Decimal:
-        self.check_night_restriction()
+        self.check_night_restriction(client_id, amount)
+        self.check_client_is_active(client_id)
         account = self.get_account(account_id)
         if self.get_client_id_for_account(account_id) != client_id:
             raise InvalidOperationError(
